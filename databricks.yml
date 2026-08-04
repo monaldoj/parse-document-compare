@@ -1,0 +1,65 @@
+# Databricks Asset Bundle for the Parser Compare app.
+#
+#   databricks bundle deploy -t dev --var="warehouse_id=<id>"
+#   databricks bundle run parse-document-compare -t dev
+#
+# This bundle is workspace-agnostic: everything specific to a workspace
+# (host, warehouse, Unity Catalog locations) is supplied through the
+# variables below, either on the command line (--var=...), via
+# BUNDLE_VAR_<name> environment variables, or per-target overrides.
+#
+# The warehouse id flows from the `warehouse_id` variable into the
+# `sql-warehouse` resource binding below; app.yaml then reads it at
+# runtime via `valueFrom: sql-warehouse`. (App env vars do NOT deploy
+# from a bundle `config.env` block — only resource bindings do — so the
+# binding is the channel. Volume paths and the endpoint name are set in
+# app.yaml.)
+bundle:
+  name: parse-document-compare
+
+# ------------------------------------------------------------
+# Deployment variables — override per workspace.
+# ------------------------------------------------------------
+variables:
+  warehouse_id:
+    description: SQL warehouse that runs ai_parse_document and ai_query.
+
+# Files synced to the workspace alongside this bundle. node_modules is
+# rebuilt by the Apps runtime and is never needed in the deployed app.
+sync:
+  exclude:
+    - node_modules
+    - .databricks
+    - .venv
+
+resources:
+  apps:
+    parse-document-compare:
+      name: parse-document-compare
+      description: "Side-by-side comparison of ai_parse_document and a Model Serving document parser"
+      # Deploy from the bundle's synced source folder.
+      source_code_path: ./
+      # Bind the SQL warehouse so app.yaml can read its id at runtime via
+      # `valueFrom: sql-warehouse`. The id is supplied per-workspace by
+      # the `warehouse_id` bundle variable. (command + env live in
+      # app.yaml, which is the source of truth for the app's config — a
+      # bundle `config.env` block does NOT deploy env to the running app.)
+      resources:
+        - name: sql-warehouse
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: CAN_USE
+
+# The workspace host is intentionally NOT set here — workspace.host does
+# not support variable interpolation. Supply it at deploy time via the
+# DATABRICKS_HOST environment variable or `--profile <name>` so the same
+# bundle targets any workspace.
+targets:
+  dev:
+    mode: development
+    default: true
+
+  prod:
+    mode: production
+    workspace:
+      root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}

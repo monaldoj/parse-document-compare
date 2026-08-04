@@ -1,0 +1,40 @@
+# Databricks App manifest.
+#
+# IMPORTANT: app.yaml is the source of truth for the app's `command` and
+# `env`. The bundle's `resources.apps.*.config` block in databricks.yml
+# does NOT deploy env vars into the running app — only the resource
+# bindings under `resources:` do. So the warehouse id must be wired
+# here, via `valueFrom` against the bound `sql-warehouse` resource.
+#
+# WAREHOUSE_ID is resolved at runtime from the `sql-warehouse` resource
+# binding (its id flows from the `warehouse_id` bundle variable through
+# databricks.yml). app.yaml itself cannot use `${var.*}` interpolation —
+# only databricks.yml can — so the binding is how the id reaches the app.
+#
+# The values below have no resource to reference, so they are hardcoded.
+# CHANGE THESE for a different workspace:
+#   DOCUMENTS_PATH       — volume folder holding the PDFs/images to parse
+#   IMAGE_OUTPUT_PATH    — volume ai_parse_document renders page images
+#                          into. Bounding boxes are reported relative to
+#                          these images, so this is what makes the
+#                          overlay pixel-exact. The volume must exist.
+#   CUSTOM_ENDPOINT_NAME — default Model Serving endpoint compared
+#                          against ai_parse_document (editable in the UI).
+#   CUSTOM_RENDER_DPI    — the DPI that endpoint rasterizes PDF pages at,
+#                          needed to map its boxes onto the page.
+# (DATABRICKS_HOST and the M2M OAuth credentials are injected by the
+# Apps runtime automatically.)
+command:
+  - node
+  - server.js
+env:
+  - name: WAREHOUSE_ID
+    valueFrom: sql-warehouse
+  - name: DOCUMENTS_PATH
+    value: /Volumes/justinm_demo/bio_track/unstructured
+  - name: IMAGE_OUTPUT_PATH
+    value: /Volumes/justinm_demo/parse/page_images
+  - name: CUSTOM_ENDPOINT_NAME
+    value: florence-2-large-ft-ai-parse-document
+  - name: CUSTOM_RENDER_DPI
+    value: "200"

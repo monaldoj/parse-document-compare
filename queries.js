@@ -1,0 +1,207 @@
+// ============================================================
+// queries.js — Parameterized parsing SQL for the Parser Compare app
+//
+// Both sides of the comparison run in ONE Databricks SQL statement
+// so the two parsers see byte-identical input:
+//
+//   • custom  → ai_query(<serving endpoint>, named_struct(...))
+//   • native  → ai_parse_document(content, map('version','2.0'))
+//
+// Each result is cast through the SAME ai_parse_document 2.0 schema
+// with from_json, so schema drift shows up as null fields instead of
+// being hidden by a permissive parse.
+//
+// Connector style mirrors Repo A (cotraveler): we go through the SQL
+// Statement Execution REST API rather than a native driver. The
+// `executeSql()` helper in server.js is the single seam — swap it for
+// a databricks-sql cursor in a Python port without touching the SQL.
+// ============================================================
+
+// Unity Catalog volume that ai_parse_document renders its page images
+// into (`imageOutputPath`). This is what makes the bounding boxes
+// pixel-exact: the native parser reports coordinates relative to the
+// image it rendered, and that image is what the UI draws on. Supplied
+// per-workspace so the app deploys anywhere without code changes.
+export const IMAGE_OUTPUT_PATH =
+  process.env.IMAGE_OUTPUT_PATH || '/Volumes/justinm_demo/parse/page_images'
+
+// Volume directory the file browser lists documents from.
+export const DOCUMENTS_PATH =
+  process.env.DOCUMENTS_PATH || '/Volumes/justinm_demo/bio_track/unstructured'
+
+// The Model Serving endpoint compared against ai_parse_document. The UI
+// can override this per run — this is only the default that pre-fills it.
+export const DEFAULT_ENDPOINT =
+  process.env.CUSTOM_ENDPOINT_NAME || 'florence-2-large-ft-ai-parse-document'
+
+// DPI the custom endpoint rasterizes PDF pages at before running OCR.
+// Its bounding boxes are in that rendered-pixel space, so the server
+// needs the same number to normalize them (see pageSpaces in server.js).
+export const CUSTOM_RENDER_DPI = Number(process.env.CUSTOM_RENDER_DPI || 200)
+
+// Exact ai_parse_document schema version 2.0. Both sides are cast
+// through this one definition — that is the whole point of the diff.
+export const PARSE_SCHEMA = `
+STRUCT<
+  document: STRUCT<
+    pages: ARRAY<STRUCT<id: INT, image_uri: STRING>>,
+    elements: ARRAY<STRUCT<
+      id: INT,
+      type: STRING,
+      content: STRING,
+      confidence: DOUBLE,
+      bbox: ARRAY<STRUCT<coord: ARRAY<DOUBLE>, page_id: INT>>,
+      description: STRING
+    >>
+  >,
+  error_status: ARRAY<STRING>,
+  metadata: STRUCT<
+    id: STRING,
+    version: STRING,
+    file_metadata: STRUCT<
+      file_path: STRING,
+      file_name: STRING,
+      file_size: BIGINT,
+      file_modification_time: STRING
+    >
+  >
+>`.trim()
+
+// ------------------------------------------------------------
+// Parameter binding
+//
+// The SQL Statement Execution API takes named markers (:name) plus a
+// typed `parameters` array — the safe, injection-proof path, exactly
+// like databricks-sql cursor params. Every builder below returns
+// { statement, parameters } ready to POST. Note that even the schema
+// string binds as a parameter: from_json accepts a bound STRING for
+// its schema argument, so no user value is ever concatenated in.
+// ------------------------------------------------------------
+function param(name, value, type = 'STRING') {
+  return { name, value: String(value), type }
+}
+
+// ============================================================
+// A. Side-by-side parse of one document.
+//
+// `pageIndex` is passed to the custom endpoint so it parses exactly
+// the page the UI is showing (its contract renders one page per call
+// — the throughput pattern the source notebook uses). Native
+// ai_parse_document always parses the whole document in one shot, so
+// the UI filters its elements by page_id client-side.
+//
+// Returns one row: both envelopes as JSON plus the macro metrics the
+// summary strip shows.
+// ============================================================
+export function compareQuery({ path, endpoint, pageIndex = 0 }) {
+  const statement = `
+    WITH files AS (
+      SELECT
+        path,
+        content,
+        base64(content) AS file_b64,
+        CASE
+          WHEN lower(path) LIKE '%.pdf' THEN 'application/pdf'
+          WHEN lower(path) LIKE '%.png' THEN 'image/png'
+          ELSE 'image/jpeg'
+        END AS mime_type
+      FROM read_files(:path, format => 'binaryFile')
+    ),
+    parsed AS (
+      SELECT
+        path,
+        length(content) AS file_size,
+        from_json(
+          ai_query(
+            :endpoint,
+            named_struct(
+              'file_b64', file_b64,
+              'mime_type', mime_type,
+              'file_path', path,
+              'file_name', regexp_extract(path, '[^/]+$', 0),
+              'file_size', length(content),
+              'page_limit', 1,
+              'page_index', :pageIndex,
+              'reformat', true
+            )
+          ).response,
+          :schema
+        ) AS custom,
+        from_json(
+          to_json(
+            ai_parse_document(
+              content,
+              map('version', '2.0', 'imageOutputPath', :imageOut)
+            )
+          ),
+          :schema
+        ) AS native
+      FROM files
+    )
+    SELECT
+      path,
+      file_size,
+      size(custom.document.elements) AS custom_elements,
+      size(native.document.elements) AS native_elements,
+      size(custom.document.pages)    AS custom_pages,
+      size(native.document.pages)    AS native_pages,
+      array_sort(array_distinct(transform(custom.document.elements, x -> x.type))) AS custom_types,
+      array_sort(array_distinct(transform(native.document.elements, x -> x.type))) AS native_types,
+      custom.metadata.version AS custom_version,
+      native.metadata.version AS native_version,
+      custom.error_status     AS custom_errors,
+      native.error_status     AS native_errors,
+      to_json(custom)         AS custom_json,
+      to_json(native)         AS native_json
+    FROM parsed
+    LIMIT 1
+  `
+  return {
+    statement,
+    parameters: [
+      param('path', path),
+      param('endpoint', endpoint),
+      param('pageIndex', pageIndex, 'INT'),
+      param('imageOut', IMAGE_OUTPUT_PATH),
+      param('schema', PARSE_SCHEMA),
+    ],
+  }
+}
+
+// ============================================================
+// B. Page-image-only parse.
+//
+// Paging through a multi-page PDF re-runs the custom endpoint for the
+// new page, but the native side has already parsed every page. This
+// renders just the page images (no LLM work on the custom side) so the
+// viewer can show a page it hasn't compared yet.
+// ============================================================
+export function pageImagesQuery({ path }) {
+  const statement = `
+    WITH files AS (
+      SELECT content FROM read_files(:path, format => 'binaryFile')
+    )
+    SELECT
+      to_json(
+        from_json(
+          to_json(
+            ai_parse_document(
+              content,
+              map('version', '2.0', 'imageOutputPath', :imageOut)
+            )
+          ),
+          :schema
+        ).document.pages
+      ) AS pages
+    FROM files
+    LIMIT 1
+  `
+  return {
+    statement,
+    parameters: [
+      param('path', path),
+      param('imageOut', IMAGE_OUTPUT_PATH),
+      param('schema', PARSE_SCHEMA),
+    ],
+  }
+}
