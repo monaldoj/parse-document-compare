@@ -27,6 +27,7 @@ import ControlPanel from './components/ControlPanel.jsx'
 import PageViewer from './components/PageViewer.jsx'
 import MarkdownView from './components/MarkdownView.jsx'
 import JsonDiff from './components/JsonDiff.jsx'
+import TimingBar from './components/TimingBar.jsx'
 import { api } from './api.js'
 
 // The three comparison views.
@@ -315,8 +316,10 @@ export default function App() {
               <div className="spinner" />
               <p>Parsing page {pageIndex + 1} with both parsers…</p>
               <p className="muted">
-                The custom endpoint runs a vision model plus an LLM reformat pass;
-                a cold scale-to-zero endpoint can take a few minutes.
+                Each parser runs as its own statement, one after the other, so their
+                run times can be compared. The custom endpoint runs a vision model
+                plus an LLM reformat pass; a cold scale-to-zero endpoint can take a
+                few minutes.
               </p>
             </div>
           )}
@@ -325,12 +328,16 @@ export default function App() {
             <div className="empty">
               <h2>Compare a document parser against <code>ai_parse_document</code></h2>
               <p className="muted">
-                Pick a PDF or image from the volume on the left. Both parsers run in a
-                single Databricks SQL statement, then compare their bounding boxes,
-                extracted markdown, or raw JSON.
+                Pick a PDF or image from the volume on the left. Each parser runs as its
+                own Databricks SQL statement — so their run times are directly
+                comparable — then compare their bounding boxes, extracted markdown, or
+                raw JSON.
               </p>
             </div>
           )}
+
+          {/* Run time head-to-head, above whichever view is selected. */}
+          {!comparing && result && <TimingBar result={result} endpoint={endpoint} />}
 
           {!comparing && result && view === 'overlay' && (
             <PageViewer

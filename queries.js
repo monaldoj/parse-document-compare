@@ -81,20 +81,10 @@ function param(name, value, type = 'STRING') {
   return { name, value: String(value), type }
 }
 
-// ============================================================
-// A. Side-by-side parse of one document.
-//
-// `pageIndex` is passed to the custom endpoint so it parses exactly
-// the page the UI is showing (its contract renders one page per call
-// — the throughput pattern the source notebook uses). Native
-// ai_parse_document always parses the whole document in one shot, so
-// the UI filters its elements by page_id client-side.
-//
-// Returns one row: both envelopes as JSON plus the macro metrics the
-// summary strip shows.
-// ============================================================
-export function compareQuery({ path, endpoint, pageIndex = 0 }) {
-  const statement = `
+// The `files` CTE both parsers start from. Reading the bytes is shared
+// setup, not parsing work, so it sits identically in front of each
+// statement — neither side gets a head start.
+const FILES_CTE = `
     WITH files AS (
       SELECT
         path,
@@ -106,7 +96,24 @@ export function compareQuery({ path, endpoint, pageIndex = 0 }) {
           ELSE 'image/jpeg'
         END AS mime_type
       FROM read_files(:path, format => 'binaryFile')
-    ),
+    )`
+
+// ============================================================
+// A. The custom Model Serving endpoint, on its own.
+//
+// Deliberately a SEPARATE statement from the native parse below so each
+// method's run time is measurable in isolation. Running both in one
+// statement (the previous design) gave a single combined duration and
+// let the optimizer interleave them; running them concurrently would
+// make them contend for the same warehouse. One at a time is the only
+// way the two numbers mean anything.
+//
+// `pageIndex` is passed through so the endpoint parses exactly the page
+// the UI is showing — its contract renders one page per call, which is
+// the throughput pattern the source notebook uses.
+// ============================================================
+export function customParseQuery({ path, endpoint, pageIndex = 0 }) {
+  const statement = `${FILES_CTE},
     parsed AS (
       SELECT
         path,
@@ -126,7 +133,47 @@ export function compareQuery({ path, endpoint, pageIndex = 0 }) {
             )
           ).response,
           :schema
-        ) AS custom,
+        ) AS custom
+      FROM files
+    )
+    SELECT
+      path,
+      file_size,
+      size(custom.document.elements) AS custom_elements,
+      size(custom.document.pages)    AS custom_pages,
+      array_sort(array_distinct(transform(custom.document.elements, x -> x.type))) AS custom_types,
+      custom.metadata.version AS custom_version,
+      custom.error_status     AS custom_errors,
+      to_json(custom)         AS custom_json
+    FROM parsed
+    LIMIT 1
+  `
+  return {
+    statement,
+    parameters: [
+      param('path', path),
+      param('endpoint', endpoint),
+      param('pageIndex', pageIndex, 'INT'),
+      param('schema', PARSE_SCHEMA),
+    ],
+  }
+}
+
+// ============================================================
+// B. Native ai_parse_document, on its own.
+//
+// Parses the whole document in one shot (unlike the custom endpoint's
+// one-page-per-call contract), so the UI filters its elements by
+// page_id client-side. `imageOutputPath` makes it write each rendered
+// page to a volume — that image is what the overlay draws on and how
+// the server learns the native coordinate space.
+// ============================================================
+export function nativeParseQuery({ path }) {
+  const statement = `${FILES_CTE},
+    parsed AS (
+      SELECT
+        path,
+        length(content) AS file_size,
         from_json(
           to_json(
             ai_parse_document(
@@ -141,17 +188,11 @@ export function compareQuery({ path, endpoint, pageIndex = 0 }) {
     SELECT
       path,
       file_size,
-      size(custom.document.elements) AS custom_elements,
       size(native.document.elements) AS native_elements,
-      size(custom.document.pages)    AS custom_pages,
       size(native.document.pages)    AS native_pages,
-      array_sort(array_distinct(transform(custom.document.elements, x -> x.type))) AS custom_types,
       array_sort(array_distinct(transform(native.document.elements, x -> x.type))) AS native_types,
-      custom.metadata.version AS custom_version,
       native.metadata.version AS native_version,
-      custom.error_status     AS custom_errors,
       native.error_status     AS native_errors,
-      to_json(custom)         AS custom_json,
       to_json(native)         AS native_json
     FROM parsed
     LIMIT 1
@@ -160,8 +201,6 @@ export function compareQuery({ path, endpoint, pageIndex = 0 }) {
     statement,
     parameters: [
       param('path', path),
-      param('endpoint', endpoint),
-      param('pageIndex', pageIndex, 'INT'),
       param('imageOut', IMAGE_OUTPUT_PATH),
       param('schema', PARSE_SCHEMA),
     ],

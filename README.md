@@ -1,10 +1,11 @@
 # Parser Compare — `ai_parse_document` vs a Model Serving endpoint
 
-An interactive Databricks App that parses one document **two ways in a
-single SQL statement** — Databricks' built-in `ai_parse_document` and any
-Model Serving endpoint you point it at via `ai_query` — then shows the
-difference three ways: **bounding boxes** on the rendered page,
-**extracted markdown**, or a **JSON diff** of the two envelopes.
+An interactive Databricks App that parses one document **two ways** —
+Databricks' built-in `ai_parse_document` and any Model Serving endpoint
+you point it at via `ai_query` — then shows the difference three ways:
+**bounding boxes** on the rendered page, **extracted markdown**, or a
+**JSON diff** of the two envelopes. Each method runs as its **own SQL
+statement**, so the app also reports how long each one took.
 
 ```
 ┌─────────────┐   /api/compare        ┌──────────────┐  parse SQL  ┌──────────────────┐
@@ -28,7 +29,7 @@ parse_document_compare/
 ├── app.yaml              # Databricks App manifest (command, env, resources)
 ├── package.json          # node deps (express, pdf-lib) + build deps (vite, react)
 ├── server.js             # Express backend: auth ladder + /api/* + bbox normalization
-├── queries.js            # Parameterized parsing SQL (the data layer)
+├── queries.js            # Parameterized SQL: one statement per parser (the data layer)
 ├── databricks.yml        # Asset Bundle (app + sql-warehouse binding)
 ├── vite.config.js        # dev server + /api proxy + build config
 ├── index.html            # SPA entry
@@ -43,6 +44,7 @@ parse_document_compare/
 │       ├── PageViewer.jsx    # side-by-side bounding-box overlay
 │       ├── MarkdownView.jsx  # side-by-side extracted markdown
 │       ├── JsonDiff.jsx      # aligned structural diff + raw JSON
+│       ├── TimingBar.jsx     # per-method run time, head to head
 │       └── colors.js         # shared element-type palette
 └── dist/                 # built frontend (created by `npm run build`)
 ```
@@ -60,6 +62,40 @@ parse_document_compare/
 Element types can be toggled off in the sidebar; the filter applies to
 both the overlay and the markdown panes. Clicking an element pins it, so
 it stays highlighted when you switch views.
+
+---
+
+## Run-time comparison
+
+A **Parse time** bar sits above all three views with each method's
+duration side by side and a proportional bar, so the gap reads at a
+glance. Measured on a warm endpoint against a receipt PNG:
+
+| method | time |
+|---|---|
+| `ai_parse_document` | **8.5 s** |
+| Florence-2 serving endpoint | **5 m 23 s** (37.9× slower) |
+
+To make those numbers mean something, the two parsers run as **two
+separate statements, one after the other**:
+
+* **Separate**, because a combined statement yields one blended duration
+  and lets the optimizer interleave the two calls.
+* **Sequential, not concurrent**, because firing both at once makes them
+  contend for the same warehouse and inflates both numbers. Sequential
+  costs little here — the two are lopsided, so the total is dominated by
+  the slow side either way.
+
+Splitting them also makes each side **independently fault-tolerant**: if
+the custom endpoint 404s or times out, `ai_parse_document`'s result and
+timing still render, with the failure reported on the custom row. (In the
+combined design, either failure killed the whole comparison.)
+
+The bar is explicit about what the numbers *don't* prove: a cold
+scale-to-zero endpoint includes start-up time, a cached result reports
+the original run's duration, and on a multi-page PDF the custom endpoint
+parsed one page while `ai_parse_document` parsed all of them. Failed runs
+are never cached, so a transient failure isn't pinned for the whole TTL.
 
 ---
 

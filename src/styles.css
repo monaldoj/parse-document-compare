@@ -417,6 +417,116 @@ td.delta.down { color: var(--native); }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ---- Parse-time head-to-head ----
+   Sits above the side-by-side results. Each parser ran as its own SQL
+   statement, so these two durations are directly comparable. */
+.timing-bar {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.timing-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.timing-head h3 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+}
+
+.timing-summary { font-size: 13px; color: var(--text); }
+.timing-summary strong { color: var(--accent); }
+
+.timing-note, .timing-caveat {
+  color: var(--muted);
+  font-size: 11px;
+}
+.timing-note { margin-left: auto; }
+.timing-caveat { margin: 8px 0 0; line-height: 1.45; }
+
+.timing-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+}
+
+.timing-row .timing-label {
+  flex-shrink: 0;
+  width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--muted);
+}
+
+/* Proportional bar — scaled against the slower of the two methods. */
+.timing-track {
+  flex: 1;
+  min-width: 60px;
+  height: 10px;
+  background: var(--bg);
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.timing-fill {
+  display: block;
+  height: 100%;
+  border-radius: 5px;
+  transition: width 0.25s ease-out;
+}
+
+.timing-row.side-custom .timing-fill { background: var(--custom); }
+.timing-row.side-native .timing-fill { background: var(--native); }
+.timing-row.failed .timing-fill { background: #f85149; }
+
+.timing-value {
+  flex-shrink: 0;
+  min-width: 118px;
+  text-align: right;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.timing-badge {
+  margin-left: 6px;
+  padding: 1px 6px;
+  background: rgba(255, 54, 33, 0.15);
+  border-radius: 8px;
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.timing-failure {
+  margin: 8px 0 0;
+  padding: 8px;
+  background: #3d1418;
+  border: 1px solid #f85149;
+  border-radius: 6px;
+  color: #ffa198;
+  font-size: 11px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
 /* ---- Side-by-side comparison ---- */
 .compare-grid {
   display: grid;

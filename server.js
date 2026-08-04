@@ -10,7 +10,8 @@ import {
   IMAGE_OUTPUT_PATH,
   CUSTOM_RENDER_DPI,
   PARSE_SCHEMA,
-  compareQuery,
+  customParseQuery,
+  nativeParseQuery,
   pageImagesQuery,
 } from './queries.js'
 
@@ -109,6 +110,10 @@ async function executeSql({ statement, parameters = [] }, token, { timeoutMs = 9
       disposition: 'INLINE',
     }),
   })
+  // Poll fast: these durations are shown to the user as a head-to-head
+  // comparison, and a coarse interval quantizes the faster method's
+  // number (a 3s poll measures a 25s parse to only ±12%).
+  const POLL_MS = 400
 
   if (!submit.ok) {
     const text = await submit.text()
@@ -130,7 +135,7 @@ async function executeSql({ statement, parameters = [] }, token, { timeoutMs = 9
       } catch {}
       throw new Error(`SQL timed out after ${Math.round(timeoutMs / 1000)}s`)
     }
-    await new Promise((r) => setTimeout(r, 3000))
+    await new Promise((r) => setTimeout(r, POLL_MS))
     const poll = await fetch(`${DB_HOST}/api/2.0/sql/statements/${statementId}`, {
       headers: { Authorization: `Bearer ${token}` },
     })
@@ -434,7 +439,18 @@ app.get('/api/documents', async (req, res) => {
   }
 })
 
-// B. The comparison itself — one SQL statement, both parsers, one page.
+// B. The comparison itself — the two parsers as two separate statements,
+// run one after another so each method's duration is measured on its own.
+//
+// Sequential, not concurrent: this workspace runs an X-Small warehouse,
+// so firing both at once would make them contend and inflate both
+// numbers. Sequential costs little in practice because the two are
+// lopsided (native seconds, the custom endpoint minutes) and it is the
+// only way the head-to-head timing is meaningful.
+//
+// Each side is also independently fault-tolerant — if one parser fails,
+// the other's result and timing still come back, with the failure
+// reported in that side's `error`.
 //
 // Returns both raw envelopes (for the JSON diff and the markdown panes)
 // plus page-relative bounding boxes for the overlay view.
@@ -460,12 +476,6 @@ app.post('/api/compare', async (req, res) => {
       // `cached: true` lets the UI explain why a result was instant.
       if (cached) return res.json({ ...cached, cached: true })
     }
-    const { rows, sql, elapsedMs } = await runSql(
-      compareQuery({ path: filePath, endpoint, pageIndex: page }), token,
-    )
-    if (!rows.length) return res.status(404).json({ error: 'file not found by read_files' })
-    const row = rows[0]
-
     // `from_json` yields SQL NULL (-> null / "null") when a side's payload
     // doesn't match the 2.0 schema at all, and a wedged endpoint can return
     // something that isn't JSON. Treat either as an empty envelope so the
@@ -482,8 +492,39 @@ app.post('/api/compare', async (req, res) => {
       }
     }
 
-    const custom = parseEnvelope(row.custom_json, 'custom')
-    const native = parseEnvelope(row.native_json, 'native')
+    // Run one statement, timing it on its own and surviving its failure.
+    // `elapsedMs` here is that method's parse duration — the number the
+    // UI puts head-to-head.
+    const runSide = async (side, query) => {
+      try {
+        const { rows, sql, elapsedMs } = await runSql(query, token)
+        if (!rows.length) throw new Error('file not found by read_files')
+        return { side, row: rows[0], sql, elapsedMs, error: null }
+      } catch (err) {
+        console.error(`${side} parse failed:`, err.message)
+        return { side, row: {}, sql: renderSql(query), elapsedMs: null, error: err.message }
+      }
+    }
+
+    // Native first: it's the fast, dependency-free side, so if the volume
+    // or warehouse is misconfigured we learn it in seconds instead of
+    // after a multi-minute custom-endpoint call.
+    const nativeRun = await runSide('native', nativeParseQuery({ path: filePath }))
+    const customRun = await runSide(
+      'custom', customParseQuery({ path: filePath, endpoint, pageIndex: page }),
+    )
+
+    // Both sides failing means nothing to show — surface it as an error
+    // rather than rendering two empty panes.
+    if (nativeRun.error && customRun.error) {
+      return res.status(502).json({
+        error: `both parsers failed — native: ${nativeRun.error} | custom: ${customRun.error}`,
+      })
+    }
+
+    const row = { ...nativeRun.row, ...customRun.row }
+    const custom = parseEnvelope(customRun.row.custom_json, 'custom')
+    const native = parseEnvelope(nativeRun.row.native_json, 'native')
     const pages = native?.document?.pages || []
 
     // The native page image is both what we draw on and how we learn
@@ -502,7 +543,8 @@ app.post('/api/compare', async (req, res) => {
       pageImage: pageMeta?.image_uri
         ? `/api/page-image?uri=${encodeURIComponent(pageMeta.image_uri)}`
         : null,
-      // Macro metrics for the summary strip.
+      // Macro metrics for the summary strip. `durationMs` is per method,
+      // measured around that method's own statement.
       metrics: {
         fileSize: Number(row.file_size || 0),
         custom: {
@@ -511,6 +553,8 @@ app.post('/api/compare', async (req, res) => {
           types: parseArray(row.custom_types),
           version: row.custom_version,
           errors: parseArray(row.custom_errors),
+          durationMs: customRun.elapsedMs,
+          failure: customRun.error,
         },
         native: {
           elements: Number(row.native_elements || 0),
@@ -518,6 +562,8 @@ app.post('/api/compare', async (req, res) => {
           types: parseArray(row.native_types),
           version: row.native_version,
           errors: parseArray(row.native_errors),
+          durationMs: nativeRun.elapsedMs,
+          failure: nativeRun.error,
         },
       },
       // Page-relative boxes + content for the overlay/markdown views.
@@ -527,10 +573,19 @@ app.post('/api/compare', async (req, res) => {
       },
       // Full envelopes for the JSON diff view.
       envelopes: { custom, native },
-      sql, elapsedMs,
+      // Each method's statement, for the "show parsing queries" overlay.
+      sqlByMethod: { custom: customRun.sql, native: nativeRun.sql },
+      // `sql`/`elapsedMs` keep the shape the query overlay expects; the
+      // total is the wall clock for both statements run back to back.
+      sql: `-- ai_parse_document (native)\n${nativeRun.sql}\n\n-- ai_query (custom endpoint)\n${customRun.sql}`,
+      elapsedMs: (nativeRun.elapsedMs || 0) + (customRun.elapsedMs || 0),
     }
 
-    cacheSet(cacheKey, payload)
+    // Only cache a clean run. A parse that failed on one side is usually
+    // transient (cold endpoint timing out, endpoint mid-redeploy), and
+    // caching it would pin that failure for the whole TTL — the analyst
+    // would have to know to hit "Re-run" to escape it.
+    if (!customRun.error && !nativeRun.error) cacheSet(cacheKey, payload)
     res.json(payload)
   } catch (err) {
     console.error('compare error:', err.message)
