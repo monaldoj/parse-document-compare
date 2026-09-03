@@ -7,11 +7,14 @@ import { PDFDocument } from 'pdf-lib'
 import {
   DOCUMENTS_PATH,
   DEFAULT_ENDPOINT,
+  DEFAULT_LEFT,
+  DEFAULT_RIGHT,
   IMAGE_OUTPUT_PATH,
   CUSTOM_RENDER_DPI,
   PARSE_SCHEMA,
-  customParseQuery,
-  nativeParseQuery,
+  PARSERS,
+  getParser,
+  parseQueryFor,
   pageImagesQuery,
 } from './queries.js'
 
@@ -35,6 +38,23 @@ const WAREHOUSE_ID =
 
 // Documents the browser will list. Only these extensions are parseable.
 const SUPPORTED_EXTENSIONS = ['.pdf', '.png', '.jpg', '.jpeg']
+
+function mimeForPath(filePath) {
+  const lower = filePath.toLowerCase()
+  if (lower.endsWith('.pdf')) return 'application/pdf'
+  if (lower.endsWith('.png')) return 'image/png'
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg'
+  return 'application/octet-stream'
+}
+
+// Volume files the UI may preview. Normalize first so `..` cannot escape
+// `/Volumes`, then require a supported extension.
+function resolveDocumentPath(filePath) {
+  const uri = path.posix.normalize((filePath || '').toString())
+  if (!uri.startsWith('/Volumes/')) return null
+  if (!SUPPORTED_EXTENSIONS.some((ext) => uri.toLowerCase().endsWith(ext))) return null
+  return uri
+}
 
 // ------------------------------------------------------------
 // Auth — Databricks Apps uses M2M OAuth; locally we accept a PAT.
@@ -365,7 +385,7 @@ function normalizeElements(envelope, pageIndex, space) {
 // endpoint runs a vision model and an LLM reformat pass). Paging through
 // a PDF, switching between the three views, or a browser reload would
 // otherwise re-pay that every time. Results are pure functions of
-// (document, endpoint, page), so we memoize them in-process.
+// (document, left parser, right parser, page), so we memoize them.
 //
 // Bounded so a long session can't grow without limit; entries expire so
 // a redeployed endpoint isn't compared against indefinitely.
@@ -409,6 +429,9 @@ app.get('/api/config', async (req, res) => {
     warehouseId: WAREHOUSE_ID,
     documentsPath: DOCUMENTS_PATH,
     defaultEndpoint: DEFAULT_ENDPOINT,
+    defaultLeft: DEFAULT_LEFT,
+    defaultRight: DEFAULT_RIGHT,
+    parsers: PARSERS,
     imageOutputPath: IMAGE_OUTPUT_PATH,
     schema: PARSE_SCHEMA,
     connected: Boolean(token),
@@ -455,22 +478,30 @@ app.get('/api/documents', async (req, res) => {
 // Returns both raw envelopes (for the JSON diff and the markdown panes)
 // plus page-relative bounding boxes for the overlay view.
 app.post('/api/compare', async (req, res) => {
-  const { path: filePath, endpoint = DEFAULT_ENDPOINT, pageIndex = 0, refresh = false } = req.body || {}
+  const {
+    path: filePath,
+    left = DEFAULT_LEFT,
+    right = DEFAULT_RIGHT,
+    pageIndex = 0,
+    refresh = false,
+  } = req.body || {}
   if (!filePath) return res.status(400).json({ error: 'path required' })
-  if (!SUPPORTED_EXTENSIONS.some((ext) => filePath.toLowerCase().endsWith(ext))) {
+  if (!resolveDocumentPath(filePath)) {
     return res.status(400).json({ error: 'only PDF, PNG, JPG, and JPEG files are supported' })
   }
-  // Reject a blank/implausible endpoint here rather than paying for a
-  // warehouse round trip that can only fail inside ai_query.
-  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/.test(String(endpoint).trim())) {
-    return res.status(400).json({ error: 'a valid Model Serving endpoint name is required' })
+  const leftParser = getParser(left)
+  const rightParser = getParser(right)
+  if (!leftParser || !rightParser) {
+    return res.status(400).json({
+      error: `unknown parser — choose one of: ${PARSERS.map((p) => p.id).join(', ')}`,
+    })
   }
   const token = await getToken()
   if (!token) return res.status(503).json({ error: 'no Databricks credentials' })
 
   try {
     const page = Math.max(0, parseInt(pageIndex, 10) || 0)
-    const cacheKey = `${filePath}|${endpoint}|${page}`
+    const cacheKey = `${filePath}|${leftParser.id}|${rightParser.id}|${page}`
     if (!refresh) {
       const cached = cacheGet(cacheKey)
       // `cached: true` lets the UI explain why a result was instant.
@@ -506,26 +537,78 @@ app.post('/api/compare', async (req, res) => {
       }
     }
 
-    // Native first: it's the fast, dependency-free side, so if the volume
-    // or warehouse is misconfigured we learn it in seconds instead of
-    // after a multi-minute custom-endpoint call.
-    const nativeRun = await runSide('native', nativeParseQuery({ path: filePath }))
-    const customRun = await runSide(
-      'custom', customParseQuery({ path: filePath, endpoint, pageIndex: page }),
-    )
+    const runParser = (parser) =>
+      runSide(parser.id, parseQueryFor(parser, { path: filePath, pageIndex: page }))
+
+    // Native first when one side is ai_parse_document: it's the fast,
+    // dependency-free side, so a misconfigured volume/warehouse fails in
+    // seconds instead of after a multi-minute endpoint call. Same engine
+    // on both sides runs once and is reused.
+    let leftRun
+    let rightRun
+    if (leftParser.id === rightParser.id) {
+      leftRun = await runParser(leftParser)
+      rightRun = leftRun
+    } else if (leftParser.kind === 'native') {
+      leftRun = await runParser(leftParser)
+      rightRun = await runParser(rightParser)
+    } else if (rightParser.kind === 'native') {
+      rightRun = await runParser(rightParser)
+      leftRun = await runParser(leftParser)
+    } else {
+      leftRun = await runParser(leftParser)
+      rightRun = await runParser(rightParser)
+    }
 
     // Both sides failing means nothing to show — surface it as an error
     // rather than rendering two empty panes.
-    if (nativeRun.error && customRun.error) {
+    if (leftRun.error && rightRun.error) {
       return res.status(502).json({
-        error: `both parsers failed — native: ${nativeRun.error} | custom: ${customRun.error}`,
+        error: `both parsers failed — ${leftParser.label}: ${leftRun.error} | ${rightParser.label}: ${rightRun.error}`,
       })
     }
 
-    const row = { ...nativeRun.row, ...customRun.row }
-    const custom = parseEnvelope(customRun.row.custom_json, 'custom')
-    const native = parseEnvelope(nativeRun.row.native_json, 'native')
-    const pages = native?.document?.pages || []
+    // Endpoint queries alias columns as custom_*; native as native_*.
+    const extract = (parser, run) => {
+      const prefix = parser.kind === 'native' ? 'native' : 'custom'
+      const row = run.row || {}
+      return {
+        path: row.path,
+        fileSize: Number(row.file_size || 0),
+        envelope: parseEnvelope(row[`${prefix}_json`], parser.id),
+        metrics: {
+          elements: Number(row[`${prefix}_elements`] || 0),
+          pages: Number(row[`${prefix}_pages`] || 0),
+          types: parseArray(row[`${prefix}_types`]),
+          version: row[`${prefix}_version`],
+          errors: parseArray(row[`${prefix}_errors`]),
+          durationMs: run.elapsedMs,
+          failure: run.error,
+        },
+      }
+    }
+
+    const leftExtract = extract(leftParser, leftRun)
+    const rightExtract = extract(rightParser, rightRun)
+    const row = { ...leftRun.row, ...rightRun.row }
+
+    // Page images come from a successful native parse. If neither side
+    // is native (or it failed), fetch images only — same SQL as /api/pages.
+    const pagesFrom = (parser, extracted) => {
+      if (parser.kind !== 'native' || extracted.metrics.failure) return null
+      const found = extracted.envelope?.document?.pages
+      return Array.isArray(found) && found.length ? found : null
+    }
+    let pages = pagesFrom(leftParser, leftExtract) || pagesFrom(rightParser, rightExtract)
+    if (!pages) {
+      try {
+        const { rows } = await runSql(pageImagesQuery({ path: filePath }), token)
+        pages = parseArray(rows[0]?.pages)
+      } catch (err) {
+        console.error('page images failed:', err.message)
+        pages = []
+      }
+    }
 
     // The native page image is both what we draw on and how we learn
     // the native coordinate space.
@@ -536,56 +619,54 @@ app.post('/api/compare', async (req, res) => {
       spaces = await pageSpaces({ filePath, nativeImage: buffer, pageIndex: page, token })
     }
 
+    const spaceFor = (parser) => (parser.kind === 'native' ? spaces.native : spaces.custom)
+    const sideMeta = (parser) => ({
+      id: parser.id,
+      label: parser.label,
+      shortLabel: parser.shortLabel,
+      kind: parser.kind,
+      endpoint: parser.endpoint || null,
+    })
+
     const payload = {
-      path: row.path,
+      path: row.path || filePath,
       pageIndex: page,
       pageCount: pages.length || 1,
       pageImage: pageMeta?.image_uri
         ? `/api/page-image?uri=${encodeURIComponent(pageMeta.image_uri)}`
         : null,
+      // Left pane stays `custom`, right pane stays `native` — the CSS
+      // and view components already key off those slot names.
+      sides: { custom: sideMeta(leftParser), native: sideMeta(rightParser) },
       // Macro metrics for the summary strip. `durationMs` is per method,
       // measured around that method's own statement.
       metrics: {
-        fileSize: Number(row.file_size || 0),
-        custom: {
-          elements: Number(row.custom_elements || 0),
-          pages: Number(row.custom_pages || 0),
-          types: parseArray(row.custom_types),
-          version: row.custom_version,
-          errors: parseArray(row.custom_errors),
-          durationMs: customRun.elapsedMs,
-          failure: customRun.error,
-        },
-        native: {
-          elements: Number(row.native_elements || 0),
-          pages: Number(row.native_pages || 0),
-          types: parseArray(row.native_types),
-          version: row.native_version,
-          errors: parseArray(row.native_errors),
-          durationMs: nativeRun.elapsedMs,
-          failure: nativeRun.error,
-        },
+        fileSize: leftExtract.fileSize || rightExtract.fileSize || Number(row.file_size || 0),
+        custom: leftExtract.metrics,
+        native: rightExtract.metrics,
       },
       // Page-relative boxes + content for the overlay/markdown views.
       elements: {
-        custom: normalizeElements(custom, page, spaces.custom),
-        native: normalizeElements(native, page, spaces.native),
+        custom: normalizeElements(leftExtract.envelope, page, spaceFor(leftParser)),
+        native: normalizeElements(rightExtract.envelope, page, spaceFor(rightParser)),
       },
       // Full envelopes for the JSON diff view.
-      envelopes: { custom, native },
+      envelopes: { custom: leftExtract.envelope, native: rightExtract.envelope },
       // Each method's statement, for the "show parsing queries" overlay.
-      sqlByMethod: { custom: customRun.sql, native: nativeRun.sql },
+      sqlByMethod: { custom: leftRun.sql, native: rightRun.sql },
       // `sql`/`elapsedMs` keep the shape the query overlay expects; the
       // total is the wall clock for both statements run back to back.
-      sql: `-- ai_parse_document (native)\n${nativeRun.sql}\n\n-- ai_query (custom endpoint)\n${customRun.sql}`,
-      elapsedMs: (nativeRun.elapsedMs || 0) + (customRun.elapsedMs || 0),
+      sql: `-- ${leftParser.label}\n${leftRun.sql}\n\n-- ${rightParser.label}\n${rightRun.sql}`,
+      elapsedMs: leftParser.id === rightParser.id
+        ? (leftRun.elapsedMs || 0)
+        : (leftRun.elapsedMs || 0) + (rightRun.elapsedMs || 0),
     }
 
     // Only cache a clean run. A parse that failed on one side is usually
     // transient (cold endpoint timing out, endpoint mid-redeploy), and
     // caching it would pin that failure for the whole TTL — the analyst
     // would have to know to hit "Re-run" to escape it.
-    if (!customRun.error && !nativeRun.error) cacheSet(cacheKey, payload)
+    if (!leftRun.error && !rightRun.error) cacheSet(cacheKey, payload)
     res.json(payload)
   } catch (err) {
     console.error('compare error:', err.message)
@@ -593,7 +674,61 @@ app.post('/api/compare', async (req, res) => {
   }
 })
 
-// C. Page count + images without re-running the custom endpoint. Used
+// C. Preview metadata — page count from the file itself, no SQL parse.
+// Picking a document in the UI loads this so the analyst can see the
+// file before spending minutes on a comparison.
+app.post('/api/preview', async (req, res) => {
+  const filePath = resolveDocumentPath(req.body?.path)
+  if (!filePath) {
+    return res.status(400).json({ error: 'a PDF, PNG, JPG, or JPEG volume path is required' })
+  }
+  const token = await getToken()
+  if (!token) return res.status(503).json({ error: 'no Databricks credentials' })
+
+  try {
+    let pageCount = 1
+    if (filePath.toLowerCase().endsWith('.pdf')) {
+      const pdf = await PDFDocument.load(await readVolumeFile(filePath, token), {
+        ignoreEncryption: true,
+      })
+      pageCount = pdf.getPageCount() || 1
+    }
+    res.json({
+      path: filePath,
+      pageCount,
+      fileUrl: `/api/document-file?path=${encodeURIComponent(filePath)}`,
+      mime: mimeForPath(filePath),
+    })
+  } catch (err) {
+    console.error('preview error:', err.message)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// D. Proxy a source document out of a Unity Catalog volume so the UI can
+// preview it. Same constraint as listing: `/Volumes/…` + a parseable
+// extension, after `.`/`..` normalization.
+app.get('/api/document-file', async (req, res) => {
+  const filePath = resolveDocumentPath(req.query.path)
+  if (!filePath) {
+    return res.status(400).json({ error: 'path must be a PDF or image under /Volumes' })
+  }
+  const token = await getToken()
+  if (!token) return res.status(503).json({ error: 'no Databricks credentials' })
+
+  try {
+    const buffer = await readVolumeFile(filePath, token)
+    res.set('Content-Type', mimeForPath(filePath))
+    res.set('Content-Disposition', `inline; filename="${filePath.split('/').pop()}"`)
+    res.set('Cache-Control', 'private, max-age=300')
+    res.send(buffer)
+  } catch (err) {
+    console.error('document-file error:', err.message)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// E. Page count + images without re-running a serving endpoint. Used
 // when the analyst pages through a PDF before comparing that page.
 app.post('/api/pages', async (req, res) => {
   const { path: filePath } = req.body || {}
@@ -619,7 +754,7 @@ app.post('/api/pages', async (req, res) => {
   }
 })
 
-// D. Proxy a rendered page image out of the Unity Catalog volume.
+// F. Proxy a rendered page image out of the Unity Catalog volume.
 //
 // This endpoint reads with the APP's credentials, so the path has to be
 // constrained or it becomes a read-any-file proxy. Two gates:
@@ -666,7 +801,8 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log(`  host:      ${DB_HOST || '(unset — set DATABRICKS_HOST)'}`)
   console.log(`  warehouse: ${WAREHOUSE_ID || '(unset — set WAREHOUSE_ID or SQL_WAREHOUSE_HTTP_PATH)'}`)
   console.log(`  documents: ${DOCUMENTS_PATH}`)
-  console.log(`  endpoint:  ${DEFAULT_ENDPOINT}`)
+  console.log(`  parsers:   ${PARSERS.map((p) => p.id).join(', ')}`)
+  console.log(`  default:   ${DEFAULT_LEFT} vs ${DEFAULT_RIGHT}`)
   console.log(`  images:    ${IMAGE_OUTPUT_PATH}`)
   if (!DB_HOST) console.warn('WARNING: DATABRICKS_HOST is not set — SQL calls will fail.')
   if (!WAREHOUSE_ID) console.warn('WARNING: no warehouse configured — set WAREHOUSE_ID or SQL_WAREHOUSE_HTTP_PATH.')

@@ -18,15 +18,29 @@
 #                          into. Bounding boxes are reported relative to
 #                          these images, so this is what makes the
 #                          overlay pixel-exact. The volume must exist.
-#   CUSTOM_ENDPOINT_NAME — default Model Serving endpoint compared
-#                          against ai_parse_document (editable in the UI).
-#   CUSTOM_RENDER_DPI    — the DPI that endpoint rasterizes PDF pages at,
-#                          needed to map its boxes onto the page.
+#   CUSTOM_ENDPOINT_NAME — Florence serving endpoint (one dropdown option).
+#   PALIGEMMA_ENDPOINT_NAME — PaliGemma serving endpoint (the other
+#                          endpoint option). Both share the same ai_query
+#                          contract; only the name differs.
+#   CUSTOM_RENDER_DPI    — the DPI those endpoints rasterize PDF pages at,
+#                          needed to map their boxes onto the page.
 # (DATABRICKS_HOST and the M2M OAuth credentials are injected by the
 # Apps runtime automatically.)
+# `npm run start:built` = `vite build && node server.js`.
+#
+# The build has to happen here, at startup, because neither the lockfile nor
+# the built frontend is committed:
+#   • package-lock.json is gitignored + sync-excluded (a lockfile generated on
+#     the corp network pins every entry to npm-proxy.cloud.databricks.com,
+#     which this builder cannot reach), so Apps resolves packages itself.
+#   • dist/ is gitignored, so there is no prebuilt frontend to serve —
+#     Express would 404 on every page if we just ran `node server.js`.
+# Everything vite needs is therefore a real runtime `dependency` in
+# package.json, not a devDependency, so an `--omit=dev` install still builds.
 command:
-  - node
-  - server.js
+  - npm
+  - run
+  - start:built
 env:
   - name: WAREHOUSE_ID
     valueFrom: sql-warehouse
@@ -36,5 +50,7 @@ env:
     value: /Volumes/justinm_demo/parse/page_images
   - name: CUSTOM_ENDPOINT_NAME
     value: florence-2-large-ft-ai-parse-document
+  - name: PALIGEMMA_ENDPOINT_NAME
+    value: paligemma2-3b-ai-parse-document
   - name: CUSTOM_RENDER_DPI
     value: "200"

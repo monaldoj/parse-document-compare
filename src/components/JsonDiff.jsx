@@ -42,7 +42,9 @@ function display(value) {
   return JSON.stringify(value)
 }
 
-export default function JsonDiff({ custom, native }) {
+export default function JsonDiff({ custom, native, sides }) {
+  const leftLabel = sides?.custom?.shortLabel || 'left'
+  const rightLabel = sides?.native?.shortLabel || 'right'
   // 'diff' aligns leaf paths; 'raw' shows the two envelopes verbatim.
   const [mode, setMode] = useState('diff')
   // Hide paths that are identical on both sides — usually most of them.
@@ -89,8 +91,8 @@ export default function JsonDiff({ custom, native }) {
         {mode === 'diff' && (
           <>
             <span className="pill pill-changed">{counts.changed} changed</span>
-            <span className="pill pill-custom">{counts.customOnly} custom-only</span>
-            <span className="pill pill-native">{counts.nativeOnly} native-only</span>
+            <span className="pill pill-custom">{counts.customOnly} {leftLabel}-only</span>
+            <span className="pill pill-native">{counts.nativeOnly} {rightLabel}-only</span>
             <span className="muted">{counts.equal} identical</span>
             <label className="footer-toggle inline">
               <input
@@ -108,8 +110,8 @@ export default function JsonDiff({ custom, native }) {
         <div className="diff-grid">
           <div className="diff-row diff-header">
             <div>JSON path</div>
-            <div>custom endpoint</div>
-            <div>ai_parse_document</div>
+            <div>{sides?.custom?.label || 'left'}</div>
+            <div>{sides?.native?.label || 'right'}</div>
           </div>
           {!shown.length ? (
             <p className="muted">The two envelopes are structurally identical.</p>
@@ -127,15 +129,15 @@ export default function JsonDiff({ custom, native }) {
         <div className="compare-grid">
           <section className="pane">
             <header className="pane-head">
-              <span className="pill pill-custom">custom</span>
-              <h3>Serving endpoint</h3>
+              <span className="pill pill-custom">{leftLabel}</span>
+              <h3>{sides?.custom?.label || 'left'}</h3>
             </header>
             <pre className="raw-json">{JSON.stringify(custom, null, 2)}</pre>
           </section>
           <section className="pane">
             <header className="pane-head">
-              <span className="pill pill-native">native</span>
-              <h3>ai_parse_document</h3>
+              <span className="pill pill-native">{rightLabel}</span>
+              <h3>{sides?.native?.label || 'right'}</h3>
             </header>
             <pre className="raw-json">{JSON.stringify(native, null, 2)}</pre>
           </section>

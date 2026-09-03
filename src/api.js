@@ -48,11 +48,14 @@ export const api = {
   // A. Parseable documents in a Unity Catalog volume directory.
   documents: (path) => get(`/api/documents?path=${encodeURIComponent(path)}`),
 
+  // Preview a document (page count + file URL) without running either parser.
+  preview: (path) => post('/api/preview', { path }),
+
   // B. The comparison — both parsers on one page of one document.
   // `refresh` forces a re-parse instead of reusing the server's cached
   // result (a parse costs minutes, so results are memoized by default).
-  compare: ({ path, endpoint, pageIndex, refresh }) =>
-    post('/api/compare', { path, endpoint, pageIndex, refresh }),
+  compare: ({ path, left, right, pageIndex, refresh }) =>
+    post('/api/compare', { path, left, right, pageIndex, refresh }),
 
   // C. Page count + rendered page images, without re-running the
   // custom endpoint (used when paging through a PDF).

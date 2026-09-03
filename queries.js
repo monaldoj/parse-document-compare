@@ -29,10 +29,60 @@ export const IMAGE_OUTPUT_PATH =
 export const DOCUMENTS_PATH =
   process.env.DOCUMENTS_PATH || '/Volumes/justinm_demo/bio_track/unstructured'
 
-// The Model Serving endpoint compared against ai_parse_document. The UI
-// can override this per run — this is only the default that pre-fills it.
-export const DEFAULT_ENDPOINT =
+// Serving-endpoint names. Florence and PaliGemma honor the same
+// ai_query contract — only the endpoint string differs. The UI picks
+// among these (plus native ai_parse_document); it no longer types a name.
+export const FLORENCE_ENDPOINT =
   process.env.CUSTOM_ENDPOINT_NAME || 'florence-2-large-ft-ai-parse-document'
+
+export const PALIGEMMA_ENDPOINT =
+  process.env.PALIGEMMA_ENDPOINT_NAME || 'paligemma2-3b-ai-parse-document'
+
+export const GEMINI_ENDPOINT =
+  process.env.GEMINI_ENDPOINT_NAME || 'gemini-3-5-flash-ai-parse-document'
+
+// Kept so existing env / startup logs still have a single default.
+export const DEFAULT_ENDPOINT = FLORENCE_ENDPOINT
+
+// The two dropdowns choose from this catalog. `kind: 'endpoint'` runs
+// customParseQuery; `kind: 'native'` runs nativeParseQuery. SQL for
+// each kind is shared — two endpoint engines differ only by `:endpoint`.
+export const PARSERS = [
+  {
+    id: 'florence',
+    label: FLORENCE_ENDPOINT,
+    shortLabel: FLORENCE_ENDPOINT,
+    kind: 'endpoint',
+    endpoint: FLORENCE_ENDPOINT,
+  },
+  {
+    id: 'paligemma',
+    label: PALIGEMMA_ENDPOINT,
+    shortLabel: PALIGEMMA_ENDPOINT,
+    kind: 'endpoint',
+    endpoint: PALIGEMMA_ENDPOINT,
+  },
+  {
+    id: 'gemini',
+    label: GEMINI_ENDPOINT,
+    shortLabel: GEMINI_ENDPOINT,
+    kind: 'endpoint',
+    endpoint: GEMINI_ENDPOINT,
+  },
+  {
+    id: 'ai_parse_document',
+    label: 'ai_parse_document',
+    shortLabel: 'ai_parse_document',
+    kind: 'native',
+  },
+]
+
+export const DEFAULT_LEFT = 'florence'
+export const DEFAULT_RIGHT = 'ai_parse_document'
+
+export function getParser(id) {
+  return PARSERS.find((p) => p.id === id) || null
+}
 
 // DPI the custom endpoint rasterizes PDF pages at before running OCR.
 // Its bounding boxes are in that rendered-pixel space, so the server
@@ -243,4 +293,11 @@ export function pageImagesQuery({ path }) {
       param('schema', PARSE_SCHEMA),
     ],
   }
+}
+
+// Dispatch to the builders above. Endpoint engines share one SQL shape;
+// native stays on ai_parse_document.
+export function parseQueryFor(parser, { path, pageIndex = 0 }) {
+  if (parser.kind === 'native') return nativeParseQuery({ path })
+  return customParseQuery({ path, endpoint: parser.endpoint, pageIndex })
 }

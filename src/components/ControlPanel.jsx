@@ -2,9 +2,9 @@
 // components/ControlPanel.jsx — sidebar
 //
 // Top to bottom: the volume directory to browse, the documents in it,
-// the Model Serving endpoint being compared against ai_parse_document,
-// and — once a comparison has run — the macro metrics and the element
-// type filter. The SQL toggle is pinned to the footer.
+// the two parser dropdowns (one per pane), and — once a comparison has
+// run — the macro metrics and the element type filter. The SQL toggle
+// is pinned to the footer.
 // ============================================================
 import { colorForType } from './colors.js'
 
@@ -33,13 +33,23 @@ function MetricRow({ label, custom, native, delta = false }) {
 export default function ControlPanel({
   documentsPath, setDocumentsPath, onReloadDocuments,
   documents, loadingDocuments, selectedPath, onSelectDocument,
-  endpoint, setEndpoint, onRerun, comparing, result, error,
+  parsers, leftParser, rightParser, setLeftParser, setRightParser,
+  onParse, comparing, loadingPreview, result, error,
   presentTypes, hiddenTypes, onToggleType,
   showQueries, onToggleQueries,
 }) {
   const metrics = result?.metrics
-  // The custom endpoint parses ONE page per call while native parses the
-  // whole document, so their envelope-wide totals aren't comparable on a
+  const left = result?.sides?.custom
+  const right = result?.sides?.native
+  const leftLabel = left?.shortLabel || 'left'
+  const rightLabel = right?.shortLabel || 'right'
+  const mixedPageScope = (left?.kind === 'endpoint' && right?.kind === 'native')
+    || (left?.kind === 'native' && right?.kind === 'endpoint')
+  const enginesDirty = result && (
+    left?.id !== leftParser || right?.id !== rightParser
+  )
+  // An endpoint parses ONE page per call while ai_parse_document parses
+  // the whole document, so envelope-wide totals aren't comparable on a
   // multi-page PDF. The per-page counts are — both sides are already
   // filtered to the page on screen.
   const perPage = result
@@ -54,7 +64,7 @@ export default function ControlPanel({
       <div className="sidebar-content">
         <h1>Parser Compare</h1>
         <p className="subtitle">
-          Model Serving vs <code>ai_parse_document</code> on Databricks SQL
+          Two parsers side by side on Databricks SQL
         </p>
 
         <form onSubmit={(e) => { e.preventDefault(); onReloadDocuments() }}>
@@ -71,21 +81,36 @@ export default function ControlPanel({
           </label>
 
           <label>
-            Custom serving endpoint
-            <input
-              type="text"
-              value={endpoint}
-              onChange={(e) => setEndpoint(e.target.value)}
-              placeholder="my-parse-document-endpoint"
-              autoComplete="off"
-              spellCheck="false"
-            />
+            Left parser
+            <select
+              value={leftParser}
+              onChange={(e) => setLeftParser(e.target.value)}
+              disabled={comparing || !parsers.length}
+            >
+              {parsers.map((p) => (
+                <option key={p.id} value={p.id}>{p.endpoint || p.label}</option>
+              ))}
+            </select>
+          </label>
+
+          <label>
+            Right parser
+            <select
+              value={rightParser}
+              onChange={(e) => setRightParser(e.target.value)}
+              disabled={comparing || !parsers.length}
+            >
+              {parsers.map((p) => (
+                <option key={p.id} value={p.id}>{p.endpoint || p.label}</option>
+              ))}
+            </select>
           </label>
         </form>
 
         {error && <p className="error">{error}</p>}
 
-        {/* Documents in the volume. Picking one runs the comparison. */}
+        {/* Documents in the volume. Picking one loads a preview; parsing
+            waits for the button below. */}
         <div className="result">
           <h2>
             Documents
@@ -122,10 +147,16 @@ export default function ControlPanel({
           <button
             type="button"
             className="rerun-btn"
-            onClick={onRerun}
-            disabled={comparing || !endpoint}
+            onClick={onParse}
+            disabled={comparing || loadingPreview}
           >
-            {comparing ? 'Parsing…' : 'Re-run comparison'}
+            {comparing
+              ? 'Parsing…'
+              : enginesDirty
+                ? 'Re-run to apply parser changes'
+                : result
+                  ? 'Re-run comparison'
+                  : 'Run comparison'}
           </button>
         )}
 
@@ -137,8 +168,8 @@ export default function ControlPanel({
               <thead>
                 <tr>
                   <th />
-                  <th>custom</th>
-                  <th>native</th>
+                  <th className="side-custom">{leftLabel}</th>
+                  <th className="side-native">{rightLabel}</th>
                   <th>Δ</th>
                 </tr>
               </thead>
@@ -156,12 +187,11 @@ export default function ControlPanel({
               </tbody>
             </table>
 
-            {metrics.native.pages > 1 && (
+            {mixedPageScope && (metrics.custom.pages > 1 || metrics.native.pages > 1) && (
               <p className="metrics-note">
-                The custom endpoint parses one page per call;{' '}
-                <code>ai_parse_document</code> parses all{' '}
-                {metrics.native.pages} pages at once. Only the per-page row
-                compares like with like.
+                Serving endpoints parse one page per call;{' '}
+                <code>ai_parse_document</code> parses the whole document at
+                once. Only the per-page row compares like with like.
               </p>
             )}
 
@@ -172,12 +202,12 @@ export default function ControlPanel({
               <div className="parse-errors">
                 {metrics.custom.errors?.map((e, i) => (
                   <p key={`c${i}`} className="parse-error">
-                    <strong>custom:</strong> {e}
+                    <strong>{leftLabel}:</strong> {e}
                   </p>
                 ))}
                 {metrics.native.errors?.map((e, i) => (
                   <p key={`n${i}`} className="parse-error">
-                    <strong>native:</strong> {e}
+                    <strong>{rightLabel}:</strong> {e}
                   </p>
                 ))}
               </div>

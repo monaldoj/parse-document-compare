@@ -182,15 +182,28 @@ runtime injects `DATABRICKS_HOST` and the OAuth credentials automatically.
 
 ## Run locally
 
-> **npm registry note:** The committed `package-lock.json` pins the public
-> npm registry, so the Databricks Apps build installs with no extra
-> config. On the Databricks corporate network the public registry is
-> unreachable — set `NPM_CONFIG_REGISTRY` to the internal proxy for local
-> installs. Leave it unset everywhere else.
+> **npm registry note:** `package-lock.json` is **not committed** (it's in
+> `.gitignore` and excluded from the bundle `sync`). The Databricks Apps
+> build runs `npm install` and resolves dependencies itself, so it needs no
+> lockfile.
+>
+> This is deliberate. On the Databricks corporate network the public npm
+> registry is unreachable, so local installs need the internal proxy — but
+> npm **rewrites the lockfile's `resolved` hosts to whatever registry it
+> fetched from**. A lockfile generated locally therefore pins all ~186
+> entries to `npm-proxy.cloud.databricks.com`, which the Apps builder
+> cannot reach, and the deploy build fails. Keeping the lockfile out avoids
+> that entirely.
 >
 > ```bash
-> export NPM_CONFIG_REGISTRY=https://npm-proxy.cloud.databricks.com/
+> export NPM_CONFIG_REGISTRY=https://npm-proxy.cloud.databricks.com/   # corp network only
 > ```
+>
+> Tradeoff: builds are not byte-reproducible — the semver ranges in
+> `package.json` are the only version pin. If you ever want reproducible
+> builds back, generate the lockfile explicitly against the public registry
+> (`npm install --registry=https://registry.npmjs.org/`) and un-ignore it;
+> do **not** commit one produced through the proxy.
 
 ```bash
 cd parse_document_compare

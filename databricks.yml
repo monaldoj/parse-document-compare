@@ -26,9 +26,17 @@ variables:
 
 # Files synced to the workspace alongside this bundle. node_modules is
 # rebuilt by the Apps runtime and is never needed in the deployed app.
+#
+# package-lock.json is excluded explicitly: a lockfile generated on the
+# Databricks corporate network pins every entry to
+# npm-proxy.cloud.databricks.com, which the Apps builder cannot reach, so
+# syncing one makes `npm install` fail during the deploy build. Excluding it
+# here means a developer's local lockfile can never reach the app, even
+# though .gitignore already keeps it out of the repo.
 sync:
   exclude:
     - node_modules
+    - package-lock.json
     - .databricks
     - .venv
 

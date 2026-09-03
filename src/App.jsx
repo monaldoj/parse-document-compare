@@ -3,18 +3,16 @@
 //
 // One document, two parsers, three ways to look at the difference:
 //
-//   1. Pick a document (and the Model Serving endpoint to compare
-//      against ai_parse_document) -> run one SQL statement that parses
-//      it both ways.
+//   1. Pick a document to preview it. Choose two parsers, then click
+//      Run comparison -> one SQL statement per side.
 //   2. Toggle the comparison view: Overlay (bounding boxes drawn on the
 //      rendered page), Markdown (the extracted content), or JSON (a
 //      structural diff of the two envelopes).
-//   3. Page through a multi-page PDF. The native parser already returned
-//      every page, but the custom endpoint parses one page per call, so
-//      changing page re-runs the comparison for that page.
+//   3. Page through a multi-page PDF. Preview follows the pager; click
+//      Run comparison to parse the page on screen.
 //
-// Overlay and Markdown are both side-by-side: custom endpoint on the
-// left, ai_parse_document on the right.
+// Overlay and Markdown are both side-by-side: the left dropdown on
+// the left, the right dropdown on the right.
 //
 // Element selection is deliberately NOT cross-parser: the two parsers
 // group text into different numbers of elements, so custom element 7
@@ -28,6 +26,7 @@ import PageViewer from './components/PageViewer.jsx'
 import MarkdownView from './components/MarkdownView.jsx'
 import JsonDiff from './components/JsonDiff.jsx'
 import TimingBar from './components/TimingBar.jsx'
+import DocumentPreview from './components/DocumentPreview.jsx'
 import { api } from './api.js'
 
 // The three comparison views.
@@ -35,6 +34,12 @@ const VIEWS = [
   { id: 'overlay', label: 'Bounding boxes' },
   { id: 'markdown', label: 'Markdown' },
   { id: 'json', label: 'JSON diff' },
+]
+
+const FALLBACK_PARSERS = [
+  { id: 'florence', label: 'florence-2-large-ft-ai-parse-document', shortLabel: 'florence-2-large-ft-ai-parse-document', kind: 'endpoint', endpoint: 'florence-2-large-ft-ai-parse-document' },
+  { id: 'paligemma', label: 'paligemma2-3b-ai-parse-document', shortLabel: 'paligemma2-3b-ai-parse-document', kind: 'endpoint', endpoint: 'paligemma2-3b-ai-parse-document' },
+  { id: 'ai_parse_document', label: 'ai_parse_document', shortLabel: 'ai_parse_document', kind: 'native' },
 ]
 
 export default function App() {
@@ -47,13 +52,17 @@ export default function App() {
   const [loadingDocuments, setLoadingDocuments] = useState(false)
   const [selectedPath, setSelectedPath] = useState(null)
 
-  // The endpoint compared against ai_parse_document. Editable so any
-  // serving endpoint honoring the same contract can be swapped in.
-  const [endpoint, setEndpoint] = useState('')
+  // Each pane's parser. Defaults come from /api/config (Florence vs
+  // ai_parse_document, matching the original layout).
+  const [leftParser, setLeftParser] = useState('florence')
+  const [rightParser, setRightParser] = useState('ai_parse_document')
+  const [parsers, setParsers] = useState(FALLBACK_PARSERS)
 
   // Comparison result for the current document + page.
   const [result, setResult] = useState(null)
   const [comparing, setComparing] = useState(false)
+  const [preview, setPreview] = useState(null)
+  const [loadingPreview, setLoadingPreview] = useState(false)
   const [pageIndex, setPageIndex] = useState(0)
   const [pageCount, setPageCount] = useState(1)
 
@@ -83,6 +92,7 @@ export default function App() {
   // Track the latest comparison request so a slow earlier parse can't
   // overwrite a newer one (parses take minutes — this matters here).
   const reqSeq = useRef(0)
+  const previewSeq = useRef(0)
   // Latest result's SQL, read when the overlay is switched on so the
   // seeding effect doesn't have to depend on (and resubscribe for)
   // every new result.
@@ -93,7 +103,9 @@ export default function App() {
     api.config().then((cfg) => {
       setConfig(cfg)
       setDocumentsPath(cfg.documentsPath)
-      setEndpoint(cfg.defaultEndpoint)
+      if (cfg.parsers?.length) setParsers(cfg.parsers)
+      if (cfg.defaultLeft) setLeftParser(cfg.defaultLeft)
+      if (cfg.defaultRight) setRightParser(cfg.defaultRight)
     }).catch((err) => setError(err.message))
   }, [])
 
@@ -160,16 +172,17 @@ export default function App() {
   // responses; a parse can take minutes, so a stale one must not win.
   const runCompare = useCallback(async (filePath, page, refresh = false) => {
     if (!filePath) return
-    // Tell the analyst why nothing happened instead of failing silently.
-    if (!endpoint.trim()) {
-      setError('Enter a Model Serving endpoint to compare against ai_parse_document.')
+    if (!leftParser || !rightParser) {
+      setError('Choose a parser for each side of the comparison.')
       return
     }
     const seq = ++reqSeq.current
     setComparing(true)
     setError(null)
     try {
-      const data = await api.compare({ path: filePath, endpoint, pageIndex: page, refresh })
+      const data = await api.compare({
+        path: filePath, left: leftParser, right: rightParser, pageIndex: page, refresh,
+      })
       if (seq !== reqSeq.current) return
       setResult(data)
       setPageCount(data.pageCount || 1)
@@ -181,30 +194,54 @@ export default function App() {
     } finally {
       if (seq === reqSeq.current) setComparing(false)
     }
-  }, [endpoint])
+  }, [leftParser, rightParser])
 
-  // Pick a document — reset to page 1 and compare it.
+  // Pick a document — load a preview only. Parsing waits for the
+  // sidebar button so the analyst can see the file first.
   function onSelectDocument(filePath) {
     setSelectedPath(filePath)
     setPageIndex(0)
+    setPageCount(1)
     setResult(null)
+    setPreview(null)
     setHiddenTypes(new Set())
-    runCompare(filePath, 0)
+    setPinned(null)
+    setHovered(null)
+    setError(null)
+    const seq = ++previewSeq.current
+    setLoadingPreview(true)
+    api.preview(filePath).then((data) => {
+      if (seq !== previewSeq.current) return
+      setPreview(data)
+      setPageCount(data.pageCount || 1)
+    }).catch((err) => {
+      if (seq !== previewSeq.current) return
+      setError(err.message)
+    }).finally(() => {
+      if (seq === previewSeq.current) setLoadingPreview(false)
+    })
   }
 
-  // Page through a multi-page PDF. The custom endpoint parses one page
-  // per call, so a page change means a fresh comparison.
+  // Page through a multi-page PDF. Preview follows the pager; parsing
+  // does not — a page change would otherwise overlay the previous page's
+  // boxes. Click Run comparison to parse the page on screen.
   function onChangePage(next) {
     const page = Math.max(0, Math.min(pageCount - 1, next))
     if (page === pageIndex || !selectedPath) return
     setPageIndex(page)
-    runCompare(selectedPath, page)
+    setResult(null)
+    setPinned(null)
+    setHovered(null)
   }
 
-  // Re-run the current page, bypassing the cached result (e.g. after
-  // redeploying the endpoint under the same name).
-  function onRerun() {
-    if (selectedPath) runCompare(selectedPath, pageIndex, true)
+  // Parse the current page. A first run may reuse the server cache;
+  // clicking again on the same engines bypasses it.
+  function onParse() {
+    if (!selectedPath) return
+    const sameEngines = result
+      && result.sides?.custom?.id === leftParser
+      && result.sides?.native?.id === rightParser
+    runCompare(selectedPath, pageIndex, Boolean(sameEngines))
   }
 
   function onToggleType(type) {
@@ -241,10 +278,14 @@ export default function App() {
         loadingDocuments={loadingDocuments}
         selectedPath={selectedPath}
         onSelectDocument={onSelectDocument}
-        endpoint={endpoint}
-        setEndpoint={setEndpoint}
-        onRerun={onRerun}
+        parsers={parsers}
+        leftParser={leftParser}
+        rightParser={rightParser}
+        setLeftParser={setLeftParser}
+        setRightParser={setRightParser}
+        onParse={onParse}
         comparing={comparing}
+        loadingPreview={loadingPreview}
         result={result}
         error={error}
         presentTypes={presentTypes}
@@ -272,7 +313,7 @@ export default function App() {
             ))}
           </div>
 
-          {result && pageCount > 1 && (
+          {selectedPath && pageCount > 1 && (
             <div className="pager">
               <button
                 type="button"
@@ -293,10 +334,10 @@ export default function App() {
           {result && (
             <div className="toolbar-stats">
               <span className="pill pill-custom">
-                custom {result.metrics.custom.elements}
+                {result.sides?.custom?.shortLabel || 'left'} {result.metrics.custom.elements}
               </span>
               <span className="pill pill-native">
-                native {result.metrics.native.elements}
+                {result.sides?.native?.shortLabel || 'right'} {result.metrics.native.elements}
               </span>
               <span className="muted">
                 {result.cached
@@ -317,27 +358,36 @@ export default function App() {
               <p>Parsing page {pageIndex + 1} with both parsers…</p>
               <p className="muted">
                 Each parser runs as its own statement, one after the other, so their
-                run times can be compared. The custom endpoint runs a vision model
+                run times can be compared. A serving endpoint runs a vision model
                 plus an LLM reformat pass; a cold scale-to-zero endpoint can take a
                 few minutes.
               </p>
             </div>
           )}
 
-          {!comparing && !result && (
+          {!comparing && !result && !selectedPath && (
             <div className="empty">
-              <h2>Compare a document parser against <code>ai_parse_document</code></h2>
+              <h2>Compare two document parsers side by side</h2>
               <p className="muted">
-                Pick a PDF or image from the volume on the left. Each parser runs as its
-                own Databricks SQL statement — so their run times are directly
-                comparable — then compare their bounding boxes, extracted markdown, or
-                raw JSON.
+                Choose a parser for each pane, then pick a PDF or image from the
+                volume to preview it. Click <strong>Run comparison</strong> when
+                you are ready — each side runs as its own Databricks SQL statement
+                so run times, bounding boxes, markdown, and JSON can be compared
+                directly.
               </p>
             </div>
           )}
 
+          {!comparing && !result && selectedPath && (
+            <DocumentPreview
+              preview={preview}
+              pageIndex={pageIndex}
+              loading={loadingPreview}
+            />
+          )}
+
           {/* Run time head-to-head, above whichever view is selected. */}
-          {!comparing && result && <TimingBar result={result} endpoint={endpoint} />}
+          {!comparing && result && <TimingBar result={result} />}
 
           {!comparing && result && view === 'overlay' && (
             <PageViewer
@@ -363,6 +413,7 @@ export default function App() {
             <JsonDiff
               custom={result.envelopes.custom}
               native={result.envelopes.native}
+              sides={result.sides}
             />
           )}
         </div>
@@ -413,10 +464,12 @@ export default function App() {
             ? 'Running both parsers…'
             : result
               ? `${result.path.split('/').pop()} · page ${pageIndex + 1} of ${pageCount}`
-              : 'No document parsed yet'}
+              : selectedPath
+                ? `Previewing ${selectedPath.split('/').pop()} · page ${pageIndex + 1} of ${pageCount}`
+                : 'No document selected'}
           {config && (
             <span className="conn">
-              {config.connected ? ' · live' : ' · no warehouse'} · {endpoint || 'no endpoint'}
+              {config.connected ? ' · live' : ' · no warehouse'} · {leftParser} vs {rightParser}
             </span>
           )}
         </div>

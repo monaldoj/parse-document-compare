@@ -13,13 +13,13 @@
 // ============================================================
 import { colorForType } from './colors.js'
 
-function BoxPane({ side, title, elements, pageImage, hiddenTypes, active, onHover, onSelect }) {
+function BoxPane({ side, pill, title, elements, pageImage, hiddenTypes, active, onHover, onSelect }) {
   const visible = elements.filter((el) => !hiddenTypes.has(el.type))
 
   return (
     <section className="pane">
       <header className="pane-head">
-        <span className={`pill pill-${side}`}>{side}</span>
+        <span className={`pill pill-${side}`}>{pill || side}</span>
         <h3>{title}</h3>
         <span className="pane-stat">{visible.length} boxes</span>
       </header>
@@ -63,11 +63,17 @@ function BoxPane({ side, title, elements, pageImage, hiddenTypes, active, onHove
 }
 
 export default function PageViewer({ result, hiddenTypes, active, onHover, onSelect }) {
+  const left = result.sides?.custom
+  const right = result.sides?.native
+  const leftTitle = left?.kind === 'endpoint' ? (left.endpoint || left.label) : (left?.label || result.path.split('/').pop())
+  const rightTitle = right?.kind === 'endpoint' ? (right.endpoint || right.label) : (right?.label || 'ai_parse_document')
+
   return (
     <div className="compare-grid">
       <BoxPane
         side="custom"
-        title={result.path.split('/').pop()}
+        pill={left?.shortLabel || 'left'}
+        title={leftTitle}
         elements={result.elements.custom}
         pageImage={result.pageImage}
         hiddenTypes={hiddenTypes}
@@ -77,7 +83,8 @@ export default function PageViewer({ result, hiddenTypes, active, onHover, onSel
       />
       <BoxPane
         side="native"
-        title="ai_parse_document"
+        pill={right?.shortLabel || 'right'}
+        title={rightTitle}
         elements={result.elements.native}
         pageImage={result.pageImage}
         hiddenTypes={hiddenTypes}

@@ -11,8 +11,8 @@
 //     not of the instant cache hit.
 //   • A scale-to-zero endpoint's first call includes cold-start time,
 //     which says more about provisioning than about parse speed.
-//   • The custom endpoint parses ONE page; native parses the whole
-//     document. On a multi-page PDF that favors the custom side, so we
+//   • An endpoint parses ONE page; ai_parse_document parses the whole
+//     document. On a multi-page PDF that favors the endpoint side, so we
 //     say so rather than implying a clean win.
 // ============================================================
 
@@ -25,10 +25,10 @@ function formatDuration(ms) {
   return `${minutes}m ${String(seconds).padStart(2, '0')}s`
 }
 
-function Row({ side, label, ms, failure, widthPct, faster }) {
+function Row({ side, pill, label, ms, failure, widthPct, faster }) {
   return (
     <div className={`timing-row side-${side} ${failure ? 'failed' : ''}`}>
-      <span className={`pill pill-${side}`}>{side}</span>
+      <span className={`pill pill-${side}`}>{pill}</span>
       <span className="timing-label">{label}</span>
       <span className="timing-track">
         <span className="timing-fill" style={{ width: `${widthPct}%` }} />
@@ -41,28 +41,47 @@ function Row({ side, label, ms, failure, widthPct, faster }) {
   )
 }
 
-export default function TimingBar({ result, endpoint }) {
+function sideCopy(side) {
+  if (!side) return { pill: 'parser', label: 'parser' }
+  if (side.kind === 'endpoint') {
+    return { pill: side.shortLabel, label: side.endpoint || side.label }
+  }
+  return { pill: side.shortLabel, label: side.label }
+}
+
+export default function TimingBar({ result }) {
   const custom = result.metrics.custom
   const native = result.metrics.native
+  const left = result.sides?.custom
+  const right = result.sides?.native
+  const leftCopy = sideCopy(left)
+  const rightCopy = sideCopy(right)
   const c = custom.durationMs
   const n = native.durationMs
+  const sameEngine = left?.id && left.id === right?.id
 
   // Scale both bars against the slower of the two.
   const max = Math.max(c || 0, n || 0) || 1
   const pct = (ms) => (ms == null ? 0 : Math.max(2, (ms / max) * 100))
 
   // Only claim a winner when both actually produced a time.
-  const bothRan = c != null && n != null
+  const bothRan = c != null && n != null && !sameEngine
   const ratio = bothRan && Math.min(c, n) > 0 ? Math.max(c, n) / Math.min(c, n) : null
-  const nativeFaster = bothRan && n < c
+  const rightFaster = bothRan && n < c
+  const mixedPageScope = (left?.kind === 'endpoint' && right?.kind === 'native')
+    || (left?.kind === 'native' && right?.kind === 'endpoint')
+  const wholeDocPages = Math.max(custom.pages || 0, native.pages || 0)
 
   return (
     <div className="timing-bar">
       <div className="timing-head">
         <h3>Parse time</h3>
+        {sameEngine && (
+          <span className="timing-note">same engine on both sides — parsed once</span>
+        )}
         {ratio != null && ratio >= 1.1 && (
           <span className="timing-summary">
-            {nativeFaster ? 'ai_parse_document' : 'custom endpoint'} was{' '}
+            {rightFaster ? rightCopy.pill : leftCopy.pill} was{' '}
             <strong>{ratio.toFixed(1)}×</strong> faster
           </span>
         )}
@@ -73,27 +92,29 @@ export default function TimingBar({ result, endpoint }) {
 
       <Row
         side="custom"
-        label={endpoint || 'serving endpoint'}
+        pill={leftCopy.pill}
+        label={leftCopy.label}
         ms={c}
         failure={custom.failure}
         widthPct={pct(c)}
-        faster={bothRan && !nativeFaster}
+        faster={bothRan && !rightFaster}
       />
       <Row
         side="native"
-        label="ai_parse_document"
+        pill={rightCopy.pill}
+        label={rightCopy.label}
         ms={n}
         failure={native.failure}
         widthPct={pct(n)}
-        faster={bothRan && nativeFaster}
+        faster={bothRan && rightFaster}
       />
 
       <p className="timing-caveat">
         Measured per statement, run back to back on the same warehouse.{' '}
-        {native.pages > 1 && (
+        {mixedPageScope && wholeDocPages > 1 && (
           <>
-            The custom endpoint parsed 1 page; <code>ai_parse_document</code> parsed
-            all {native.pages}.{' '}
+            The serving endpoint parsed 1 page; <code>ai_parse_document</code> parsed
+            all {wholeDocPages}.{' '}
           </>
         )}
         A cold scale-to-zero endpoint includes start-up time.
@@ -101,8 +122,8 @@ export default function TimingBar({ result, endpoint }) {
 
       {(custom.failure || native.failure) && (
         <p className="timing-failure">
-          {custom.failure && <>custom: {custom.failure}<br /></>}
-          {native.failure && <>native: {native.failure}</>}
+          {custom.failure && <>{leftCopy.pill}: {custom.failure}<br /></>}
+          {native.failure && <>{rightCopy.pill}: {native.failure}</>}
         </p>
       )}
     </div>

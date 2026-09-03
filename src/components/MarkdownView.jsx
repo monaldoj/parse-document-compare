@@ -45,13 +45,13 @@ function elementHtml(el) {
   return '<p class="muted">No content</p>'
 }
 
-function MarkdownPane({ side, title, elements, hiddenTypes, active, onHover, onSelect }) {
+function MarkdownPane({ side, pill, title, elements, hiddenTypes, active, onHover, onSelect }) {
   const visible = elements.filter((el) => !hiddenTypes.has(el.type))
 
   return (
     <section className="pane">
       <header className="pane-head">
-        <span className={`pill pill-${side}`}>{side}</span>
+        <span className={`pill pill-${side}`}>{pill || side}</span>
         <h3>{title}</h3>
         <span className="pane-stat">{visible.length} elements</span>
       </header>
@@ -94,11 +94,17 @@ function MarkdownPane({ side, title, elements, hiddenTypes, active, onHover, onS
 }
 
 export default function MarkdownView({ result, hiddenTypes, active, onHover, onSelect }) {
+  const left = result.sides?.custom
+  const right = result.sides?.native
+  const leftTitle = left?.kind === 'endpoint' ? (left.endpoint || left.label) : (left?.label || result.path.split('/').pop())
+  const rightTitle = right?.kind === 'endpoint' ? (right.endpoint || right.label) : (right?.label || 'ai_parse_document')
+
   return (
     <div className="compare-grid">
       <MarkdownPane
         side="custom"
-        title={result.path.split('/').pop()}
+        pill={left?.shortLabel || 'left'}
+        title={leftTitle}
         elements={result.elements.custom}
         hiddenTypes={hiddenTypes}
         active={active}
@@ -107,7 +113,8 @@ export default function MarkdownView({ result, hiddenTypes, active, onHover, onS
       />
       <MarkdownPane
         side="native"
-        title="ai_parse_document"
+        pill={right?.shortLabel || 'right'}
+        title={rightTitle}
         elements={result.elements.native}
         hiddenTypes={hiddenTypes}
         active={active}

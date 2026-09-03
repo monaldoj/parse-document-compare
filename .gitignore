@@ -1,5 +1,14 @@
 node_modules/
 dist/
+# Intentionally NOT committed: the Databricks Apps build runs `npm install`
+# and resolves from the public npm registry itself. A lockfile generated on
+# the Databricks corporate network pins every entry to
+# npm-proxy.cloud.databricks.com, which the Apps builder cannot reach — so a
+# committed lockfile breaks the deploy build. Leaving it out keeps installs
+# resolving against whatever registry the build environment is configured for.
+# Tradeoff: builds are not byte-reproducible; package.json semver ranges are
+# the only version pin.
+package-lock.json
 .env
 .env.local
 *.log
