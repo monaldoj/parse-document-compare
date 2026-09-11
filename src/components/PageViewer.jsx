@@ -1,37 +1,45 @@
 // ============================================================
 // components/PageViewer.jsx — side-by-side bounding-box overlay
 //
-// Both panes draw the SAME rendered page image (the one
-// ai_parse_document wrote to the volume via imageOutputPath) with a
-// different parser's boxes on top. That is deliberate: overlaying both
-// parsers on one identical raster is the only way a difference in boxes
-// is attributable to the parser rather than to the rendering.
+// Both panes draw the SAME page raster with a different parser's boxes
+// on top. Prefer the JPEG ai_parse_document wrote via imageOutputPath;
+// if native wasn't a selected model (or that write is missing), fall
+// back to the source image or the source PDF so endpoint-only
+// comparisons still have a page to overlay.
 //
 // The server already converted every box into page-relative percentages
 // (see normalizeElements in server.js), so positioning is just a CSS
 // percentage — no DPI or image-size math in the browser.
 // ============================================================
 import { colorForType } from './colors.js'
+import PageBackdrop from './PageBackdrop.jsx'
 
-function BoxPane({ side, pill, title, elements, pageImage, hiddenTypes, active, onHover, onSelect }) {
+function BoxPane({
+  side, pill, title, elements, pageImage, sourceFile, pageIndex, path, pageAspect,
+  hiddenTypes, active, onHover, onSelect,
+}) {
   const visible = elements.filter((el) => !hiddenTypes.has(el.type))
+  const boxed = visible.filter((el) => el.rects?.length)
 
   return (
     <section className="pane">
       <header className="pane-head">
         <span className={`pill pill-${side}`}>{pill || side}</span>
         <h3>{title}</h3>
-        <span className="pane-stat">{visible.length} boxes</span>
+        <span className="pane-stat">{boxed.length} boxes</span>
       </header>
 
       <div className="page-stage">
-        {pageImage ? (
-          <img src={pageImage} alt={`Rendered page (${side})`} className="page-image" />
-        ) : (
-          <p className="muted">No rendered page image available</p>
-        )}
+        <PageBackdrop
+          pageImage={pageImage}
+          sourceFile={sourceFile}
+          pageIndex={pageIndex}
+          path={path}
+          side={side}
+          pageAspect={pageAspect}
+        />
 
-        {visible.map((el) =>
+        {boxed.map((el) =>
           el.rects.map((rect, i) => {
             const token = `${side}:${el.idx}`
             const isActive = active === token
@@ -69,6 +77,14 @@ export default function PageViewer({ result, hiddenTypes, active, onHover, onSel
   const rightSkipped = right?.kind === 'none'
   const leftTitle = left?.kind === 'endpoint' ? (left.endpoint || left.label) : (left?.label || result.path.split('/').pop())
   const rightTitle = right?.kind === 'endpoint' ? (right.endpoint || right.label) : (right?.label || 'ai_parse_document')
+  const backdrop = {
+    pageImage: result.pageImage,
+    sourceFile: result.sourceFile
+      || (result.path ? `/api/document-file?path=${encodeURIComponent(result.path)}` : null),
+    pageIndex: result.pageIndex || 0,
+    path: result.path,
+    pageAspect: result.pageAspect,
+  }
 
   return (
     <div className={`compare-grid${leftSkipped || rightSkipped ? ' single' : ''}`}>
@@ -78,11 +94,11 @@ export default function PageViewer({ result, hiddenTypes, active, onHover, onSel
           pill={left?.shortLabel || 'left'}
           title={leftTitle}
           elements={result.elements.custom}
-          pageImage={result.pageImage}
           hiddenTypes={hiddenTypes}
           active={active}
           onHover={onHover}
           onSelect={onSelect}
+          {...backdrop}
         />
       )}
       {!rightSkipped && (
@@ -91,11 +107,11 @@ export default function PageViewer({ result, hiddenTypes, active, onHover, onSel
           pill={right?.shortLabel || 'right'}
           title={rightTitle}
           elements={result.elements.native}
-          pageImage={result.pageImage}
           hiddenTypes={hiddenTypes}
           active={active}
           onHover={onHover}
           onSelect={onSelect}
+          {...backdrop}
         />
       )}
     </div>

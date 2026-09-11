@@ -1,7 +1,10 @@
 # Databricks Asset Bundle for the Parser Compare app.
 #
 #   databricks bundle deploy -t dev --var="warehouse_id=<id>"
-#   databricks bundle run parse-document-compare -t dev
+#
+# `lifecycle.started: true` on the app resource makes deploy also
+# push source and start (or restart) the app — no separate
+# `databricks bundle run` is required.
 #
 # This bundle is workspace-agnostic: everything specific to a workspace
 # (host, warehouse, Unity Catalog locations) is supplied through the
@@ -47,6 +50,11 @@ resources:
       description: "Side-by-side comparison of ai_parse_document and a Model Serving document parser"
       # Deploy from the bundle's synced source folder.
       source_code_path: ./
+      # Start (or restart) the app as part of `bundle deploy` so a
+      # separate `bundle run` is not needed. Requires the direct
+      # deployment engine (the CLI default).
+      lifecycle:
+        started: true
       # Bind the SQL warehouse so app.yaml can read its id at runtime via
       # `valueFrom: sql-warehouse`. The id is supplied per-workspace by
       # the `warehouse_id` bundle variable. (command + env live in

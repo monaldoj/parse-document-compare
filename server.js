@@ -286,13 +286,23 @@ function imageSize(buffer) {
 }
 
 // The pixel space each side's coordinates live in, for one page.
+// `nativeImage` is optional: endpoint-only comparisons still need the
+// custom space (PDF points × DPI, or the source raster's dimensions)
+// so boxes and Markdown survive without a native `image_uri`.
 async function pageSpaces({ filePath, nativeImage, pageIndex, token }) {
-  const native = imageSize(nativeImage)
+  const native = nativeImage ? imageSize(nativeImage) : null
   const isPdf = filePath.toLowerCase().endsWith('.pdf')
 
   if (!isPdf) {
     // Same source raster for both parsers → one shared space.
-    return { native, custom: native }
+    if (native) return { native, custom: native }
+    try {
+      const size = imageSize(await readVolumeFile(filePath, token))
+      return { native: size, custom: size }
+    } catch (err) {
+      console.error('source image size probe failed:', err.message)
+      return { native: null, custom: null }
+    }
   }
 
   // PDF: the custom endpoint rasterized the page itself at its own DPI.
@@ -300,7 +310,7 @@ async function pageSpaces({ filePath, nativeImage, pageIndex, token }) {
     const pdf = await PDFDocument.load(await readVolumeFile(filePath, token), {
       ignoreEncryption: true,
     })
-    const page = pdf.getPage(Math.min(pageIndex, pdf.getPageCount() - 1))
+    const page = pdf.getPage(Math.min(pageIndex, Math.max(pdf.getPageCount() - 1, 0)))
     const { width, height } = page.getSize()   // PDF points (72/inch)
     const scale = CUSTOM_RENDER_DPI / 72
     return {
@@ -314,26 +324,66 @@ async function pageSpaces({ filePath, nativeImage, pageIndex, token }) {
   }
 }
 
-// A JSON_ARRAY column as a real array. The warehouse returns these as
-// JSON text, and a NULL column arrives as null/"null".
+// A JSON_ARRAY column as a real array. The warehouse usually returns
+// these as JSON text; NULL arrives as null/"null". INLINE JSON_ARRAY
+// can also hand back an already-parsed array.
 function parseArray(text) {
+  if (Array.isArray(text)) return text
   if (!text || text === 'null') return []
   try {
-    const value = JSON.parse(text)
+    const value = typeof text === 'string' ? JSON.parse(text) : text
     return Array.isArray(value) ? value : []
   } catch {
     return []
   }
 }
 
-// Convert one envelope's elements into page-relative fractions, keeping
-// only the elements that have a box on the requested page.
-function normalizeElements(envelope, pageIndex, space) {
+function boxPageId(box) {
+  if (box?.page_id == null || box?.page_id === '') return null
+  const n = Number(box.page_id)
+  return Number.isFinite(n) ? n : null
+}
+
+function distinctPageIds(envelope) {
+  const ids = new Set()
+  for (const el of envelope?.document?.elements || []) {
+    for (const box of el.bbox || []) {
+      const id = boxPageId(box)
+      if (id != null) ids.add(id)
+    }
+  }
+  return ids
+}
+
+// Convert one envelope's elements into page-relative fractions.
+//
+// Overlay and Markdown share this list. Two things used to empty both
+// views even when the parser returned a full envelope:
+//
+//   • Serving endpoints parse one page per call and often stamp
+//     `page_id: 0` (or omit it) on every box. The UI pager is the
+//     real page index, so a strict page_id filter dropped everything
+//     on page 2+.
+//   • Pixel boxes need a page size. That used to come only from a
+//     native `image_uri`, so skipping `ai_parse_document` in the
+//     dropdowns dropped every box — and Markdown with it.
+//
+// `keepUnboxed` (endpoint parses) still surfaces content with no
+// drawable rect so Markdown isn't hostage to the overlay.
+function normalizeElements(envelope, pageIndex, space, { keepUnboxed = false } = {}) {
   const elements = envelope?.document?.elements || []
+  const page = Number(pageIndex)
+  const ids = distinctPageIds(envelope)
+  const remapTo = !ids.has(page) && ids.size === 1 ? [...ids][0] : null
   const out = []
   elements.forEach((el, idx) => {
-    const boxes = (el.bbox || []).filter((b) => Number(b?.page_id) === Number(pageIndex))
-    if (!boxes.length) return
+    const boxes = (el.bbox || []).filter((b) => {
+      const id = boxPageId(b)
+      if (id === page) return true
+      if (remapTo != null && id === remapTo) return true
+      if (keepUnboxed && id == null) return true
+      return false
+    })
     const rects = boxes
       .map((b) => {
         const c = (b.coord || []).map(Number)
@@ -362,7 +412,8 @@ function normalizeElements(envelope, pageIndex, space) {
         }
       })
       .filter(Boolean)
-    if (!rects.length) return
+    const hasContent = Boolean(el.content || el.description)
+    if (!rects.length && !(keepUnboxed && hasContent)) return
     out.push({
       // `idx` is the element's position in the envelope — the stable key
       // the overlay and the markdown pane use to cross-highlight.
@@ -376,6 +427,27 @@ function normalizeElements(envelope, pageIndex, space) {
     })
   })
   return out
+}
+
+// Native page rasters for the overlay. Used when a comparison side is
+// `ai_parse_document`, and also on its own when neither dropdown is —
+// the overlay still needs the JPEGs `imageOutputPath` writes.
+async function loadNativePageImages(filePath, token) {
+  const { rows, sql, elapsedMs } = await runSql(pageImagesQuery({ path: filePath }), token)
+  return { pages: parseArray(rows[0]?.pages), sql, elapsedMs }
+}
+
+async function countDocumentPages(filePath, token) {
+  if (!filePath.toLowerCase().endsWith('.pdf')) return 1
+  try {
+    const pdf = await PDFDocument.load(await readVolumeFile(filePath, token), {
+      ignoreEncryption: true,
+    })
+    return pdf.getPageCount() || 1
+  } catch (err) {
+    console.error('page count probe failed:', err.message)
+    return 1
+  }
 }
 
 // ------------------------------------------------------------
@@ -556,6 +628,23 @@ app.post('/api/compare', async (req, res) => {
       return runSide(parser.id, parseQueryFor(parser, { path: filePath, pageIndex: page }))
     }
 
+    // Overlay rasters come from ai_parse_document's imageOutputPath, not
+    // from the serving endpoints. When neither dropdown is native, write
+    // those JPEGs first (the same SQL as /api/pages) so the overlay is
+    // populated even though native isn't a selected model. Doing it
+    // before the slow endpoint calls also keeps that work off the
+    // head-to-head timing.
+    const needsImagePass = leftParser.kind !== 'native' && rightParser.kind !== 'native'
+    let pages = null
+    if (needsImagePass) {
+      try {
+        pages = (await loadNativePageImages(filePath, token)).pages
+      } catch (err) {
+        console.error('page images failed:', err.message)
+        pages = []
+      }
+    }
+
     // Native first when one side is ai_parse_document: it's the fast,
     // dependency-free side, so a misconfigured volume/warehouse fails in
     // seconds instead of after a multi-minute endpoint call. Same engine
@@ -635,32 +724,36 @@ app.post('/api/compare', async (req, res) => {
     const rightExtract = extract(rightParser, rightRun)
     const row = { ...leftRun.row, ...rightRun.row }
 
-    // Page images come from a successful native parse. If neither side
-    // is native (or it failed), fetch images only — same SQL as /api/pages.
+    // Prefer pages from a native comparison side; otherwise keep the
+    // image pass we ran up front, or fetch now if native was selected
+    // but failed to return pages.
     const pagesFrom = (parser, extracted) => {
       if (parser.kind !== 'native' || extracted.metrics.failure) return null
       const found = extracted.envelope?.document?.pages
       return Array.isArray(found) && found.length ? found : null
     }
-    let pages = pagesFrom(leftParser, leftExtract) || pagesFrom(rightParser, rightExtract)
+    pages = pagesFrom(leftParser, leftExtract) || pagesFrom(rightParser, rightExtract) || pages
     if (!pages) {
       try {
-        const { rows } = await runSql(pageImagesQuery({ path: filePath }), token)
-        pages = parseArray(rows[0]?.pages)
+        pages = (await loadNativePageImages(filePath, token)).pages
       } catch (err) {
         console.error('page images failed:', err.message)
         pages = []
       }
     }
 
-    // The native page image is both what we draw on and how we learn
-    // the native coordinate space.
-    const pageMeta = pages.find((p) => Number(p.id) === page) || pages[0]
-    let spaces = { native: null, custom: null }
+    const pageMeta = (pages || []).find((p) => Number(p.id) === page) || pages?.[0]
+    let nativeBuffer = null
     if (pageMeta?.image_uri) {
-      const buffer = await readVolumeFile(pageMeta.image_uri, token)
-      spaces = await pageSpaces({ filePath, nativeImage: buffer, pageIndex: page, token })
+      try {
+        nativeBuffer = await readVolumeFile(pageMeta.image_uri, token)
+      } catch (err) {
+        console.error('page image read failed:', err.message)
+      }
     }
+    const spaces = await pageSpaces({
+      filePath, nativeImage: nativeBuffer, pageIndex: page, token,
+    })
 
     const spaceFor = (parser) => (parser.kind === 'native' ? spaces.native : spaces.custom)
     const sideMeta = (parser) => ({
@@ -670,14 +763,25 @@ app.post('/api/compare', async (req, res) => {
       kind: parser.kind,
       endpoint: parser.endpoint || null,
     })
+    const isPdf = filePath.toLowerCase().endsWith('.pdf')
+    const sourceFile = `/api/document-file?path=${encodeURIComponent(filePath)}`
+    const pageCount = (pages && pages.length) || await countDocumentPages(filePath, token)
+    const drawnSpace = spaces.native || spaces.custom
+    const pageAspect = drawnSpace?.width > 0 && drawnSpace?.height > 0
+      ? drawnSpace.width / drawnSpace.height
+      : null
 
     const payload = {
       path: row.path || filePath,
       pageIndex: page,
-      pageCount: pages.length || 1,
+      pageCount,
       pageImage: pageMeta?.image_uri
         ? `/api/page-image?uri=${encodeURIComponent(pageMeta.image_uri)}`
-        : null,
+        : (isPdf ? null : sourceFile),
+      // Source file the overlay can rasterize when native JPEGs are
+      // missing (endpoint-only compare, image pass failed, etc.).
+      sourceFile,
+      pageAspect,
       // Left pane stays `custom`, right pane stays `native` — the CSS
       // and view components already key off those slot names.
       sides: { custom: sideMeta(leftParser), native: sideMeta(rightParser) },
@@ -690,8 +794,16 @@ app.post('/api/compare', async (req, res) => {
       },
       // Page-relative boxes + content for the overlay/markdown views.
       elements: {
-        custom: leftActive ? normalizeElements(leftExtract.envelope, page, spaceFor(leftParser)) : [],
-        native: rightActive ? normalizeElements(rightExtract.envelope, page, spaceFor(rightParser)) : [],
+        custom: leftActive
+          ? normalizeElements(leftExtract.envelope, page, spaceFor(leftParser), {
+            keepUnboxed: leftParser.kind === 'endpoint',
+          })
+          : [],
+        native: rightActive
+          ? normalizeElements(rightExtract.envelope, page, spaceFor(rightParser), {
+            keepUnboxed: rightParser.kind === 'endpoint',
+          })
+          : [],
       },
       // Full envelopes for the JSON diff view.
       envelopes: { custom: leftExtract.envelope, native: rightExtract.envelope },
@@ -787,9 +899,7 @@ app.post('/api/pages', async (req, res) => {
   if (!token) return res.status(503).json({ error: 'no Databricks credentials' })
 
   try {
-    const { rows, sql, elapsedMs } = await runSql(pageImagesQuery({ path: filePath }), token)
-    if (!rows.length) return res.status(404).json({ error: 'file not found by read_files' })
-    const pages = parseArray(rows[0]?.pages)
+    const { pages, sql, elapsedMs } = await loadNativePageImages(filePath, token)
     res.json({
       pageCount: pages.length,
       pages: pages.map((p) => ({

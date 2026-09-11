@@ -279,10 +279,10 @@ export function nativeParseQuery({ path }) {
 // ============================================================
 // B. Page-image-only parse.
 //
-// Paging through a multi-page PDF re-runs the custom endpoint for the
-// new page, but the native side has already parsed every page. This
-// renders just the page images (no LLM work on the custom side) so the
-// viewer can show a page it hasn't compared yet.
+// Writes rendered page JPEGs via imageOutputPath without running a
+// serving endpoint. Used when paging before a comparison, and when
+// neither comparison dropdown is ai_parse_document — the overlay still
+// needs those rasters even though native isn't a selected model.
 // ============================================================
 export function pageImagesQuery({ path }) {
   const statement = `

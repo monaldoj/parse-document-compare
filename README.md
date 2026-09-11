@@ -247,14 +247,10 @@ warehouse id is passed in at deploy time.
 export DATABRICKS_HOST="https://my-workspace.cloud.databricks.com"
 export DATABRICKS_TOKEN="dapi..."
 
-# 1. Build the frontend (the app serves dist/ — no build step on the app side)
-npm install && npm run build
-
-# 2. Deploy, passing your warehouse id
+# Deploy and start the app, passing your warehouse id.
+# `lifecycle.started: true` in databricks.yml makes deploy also push
+# source and start (or restart) the app — no separate bundle run.
 databricks bundle deploy -t dev --var="warehouse_id=<your-warehouse-id>"
-
-# 3. Start the app
-databricks bundle run parse-document-compare -t dev
 ```
 
 `warehouse_id` binds the SQL warehouse as a `CAN_USE` resource named

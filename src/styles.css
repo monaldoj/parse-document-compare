@@ -649,6 +649,13 @@ td.delta.down { color: var(--native); }
   height: auto;
 }
 
+.page-pdf-fallback {
+  border: 0;
+  pointer-events: none;
+  aspect-ratio: 8.5 / 11;
+  min-height: 480px;
+}
+
 .bbox {
   position: absolute;
   padding: 0;
