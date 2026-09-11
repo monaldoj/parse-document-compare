@@ -42,6 +42,7 @@ const FALLBACK_PARSERS = [
   { id: 'paligemma', label: 'paligemma2-3b-ai-parse-document', shortLabel: 'paligemma2-3b-ai-parse-document', kind: 'endpoint', endpoint: 'paligemma2-3b-ai-parse-document' },
   { id: 'gemini', label: 'gemini-3-5-flash-ai-parse-document', shortLabel: 'gemini-3-5-flash-ai-parse-document', kind: 'endpoint', endpoint: 'gemini-3-5-flash-ai-parse-document' },
   { id: 'ai_parse_document', label: 'ai_parse_document', shortLabel: 'ai_parse_document', kind: 'native' },
+  { id: 'none', label: 'No model', shortLabel: 'No model', kind: 'none' },
 ]
 
 export default function App() {
@@ -170,12 +171,12 @@ export default function App() {
     if (config?.documentsPath) loadDocuments(config.documentsPath)
   }, [config?.documentsPath, loadDocuments])
 
-  // Run both parsers over one page. Guarded against out-of-order
+  // Run one or both parsers over one page. Guarded against out-of-order
   // responses; a parse can take minutes, so a stale one must not win.
   const runCompare = useCallback(async (filePath, page, refresh = false) => {
     if (!filePath) return
-    if (!leftParser || !rightParser) {
-      setError('Choose a parser for each side of the comparison.')
+    if (leftParser === 'none' && rightParser === 'none') {
+      setError('Choose at least one parser.')
       return
     }
     const seq = ++reqSeq.current
@@ -269,6 +270,9 @@ export default function App() {
     : []
 
   const active = pinned || hovered
+  const singleParse = leftParser === 'none' || rightParser === 'none'
+  const leftResultSkipped = result?.sides?.custom?.kind === 'none'
+  const rightResultSkipped = result?.sides?.native?.kind === 'none'
 
   return (
     <div className="app">
@@ -335,12 +339,16 @@ export default function App() {
 
           {result && (
             <div className="toolbar-stats">
-              <span className="pill pill-custom">
-                {result.sides?.custom?.shortLabel || 'left'} {result.metrics.custom.elements}
-              </span>
-              <span className="pill pill-native">
-                {result.sides?.native?.shortLabel || 'right'} {result.metrics.native.elements}
-              </span>
+              {!leftResultSkipped && (
+                <span className="pill pill-custom">
+                  {result.sides?.custom?.shortLabel || 'left'} {result.metrics.custom.elements}
+                </span>
+              )}
+              {!rightResultSkipped && (
+                <span className="pill pill-native">
+                  {result.sides?.native?.shortLabel || 'right'} {result.metrics.native.elements}
+                </span>
+              )}
               <span className="muted">
                 {result.cached
                   ? 'cached'
@@ -357,12 +365,11 @@ export default function App() {
           {comparing && (
             <div className="overlay-notice">
               <div className="spinner" />
-              <p>Parsing page {pageIndex + 1} with both parsers…</p>
+              <p>Parsing page {pageIndex + 1}{singleParse ? '…' : ' with both parsers…'}</p>
               <p className="muted">
-                Each parser runs as its own statement, one after the other, so their
-                run times can be compared. A serving endpoint runs a vision model
-                plus an LLM reformat pass; a cold scale-to-zero endpoint can take a
-                few minutes.
+                {singleParse
+                  ? 'The selected parser runs as its own Databricks SQL statement. A serving endpoint runs a vision model plus an LLM reformat pass; a cold scale-to-zero endpoint can take a few minutes.'
+                  : 'Each parser runs as its own statement, one after the other, so their run times can be compared. A serving endpoint runs a vision model plus an LLM reformat pass; a cold scale-to-zero endpoint can take a few minutes.'}
               </p>
             </div>
           )}
@@ -371,11 +378,12 @@ export default function App() {
             <div className="empty">
               <h2>Compare two document parsers side by side</h2>
               <p className="muted">
-                Choose a parser for each pane, then pick a PDF or image from the
-                volume to preview it. Click <strong>Run comparison</strong> when
-                you are ready — each side runs as its own Databricks SQL statement
-                so run times, bounding boxes, markdown, and JSON can be compared
-                directly.
+                Choose a parser for each pane — or <strong>No model</strong> on one
+                side to run a single parser. Pick a PDF or image from the volume
+                to preview it, then click <strong>Run comparison</strong> when
+                you are ready. Each selected side runs as its own Databricks SQL
+                statement so run times, bounding boxes, markdown, and JSON can be
+                compared directly.
               </p>
             </div>
           )}
@@ -463,7 +471,7 @@ export default function App() {
 
         <div className="status">
           {comparing
-            ? 'Running both parsers…'
+            ? (singleParse ? 'Parsing…' : 'Running both parsers…')
             : result
               ? `${result.path.split('/').pop()} · page ${pageIndex + 1} of ${pageCount}`
               : selectedPath
@@ -471,7 +479,10 @@ export default function App() {
                 : 'No document selected'}
           {config && (
             <span className="conn">
-              {config.connected ? ' · live' : ' · no warehouse'} · {leftParser} vs {rightParser}
+              {config.connected ? ' · live' : ' · no warehouse'} ·{' '}
+              {parsers.find((p) => p.id === leftParser)?.label || leftParser}
+              {' vs '}
+              {parsers.find((p) => p.id === rightParser)?.label || rightParser}
             </span>
           )}
         </div>

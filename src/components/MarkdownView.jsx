@@ -96,31 +96,37 @@ function MarkdownPane({ side, pill, title, elements, hiddenTypes, active, onHove
 export default function MarkdownView({ result, hiddenTypes, active, onHover, onSelect }) {
   const left = result.sides?.custom
   const right = result.sides?.native
+  const leftSkipped = left?.kind === 'none'
+  const rightSkipped = right?.kind === 'none'
   const leftTitle = left?.kind === 'endpoint' ? (left.endpoint || left.label) : (left?.label || result.path.split('/').pop())
   const rightTitle = right?.kind === 'endpoint' ? (right.endpoint || right.label) : (right?.label || 'ai_parse_document')
 
   return (
-    <div className="compare-grid">
-      <MarkdownPane
-        side="custom"
-        pill={left?.shortLabel || 'left'}
-        title={leftTitle}
-        elements={result.elements.custom}
-        hiddenTypes={hiddenTypes}
-        active={active}
-        onHover={onHover}
-        onSelect={onSelect}
-      />
-      <MarkdownPane
-        side="native"
-        pill={right?.shortLabel || 'right'}
-        title={rightTitle}
-        elements={result.elements.native}
-        hiddenTypes={hiddenTypes}
-        active={active}
-        onHover={onHover}
-        onSelect={onSelect}
-      />
+    <div className={`compare-grid${leftSkipped || rightSkipped ? ' single' : ''}`}>
+      {!leftSkipped && (
+        <MarkdownPane
+          side="custom"
+          pill={left?.shortLabel || 'left'}
+          title={leftTitle}
+          elements={result.elements.custom}
+          hiddenTypes={hiddenTypes}
+          active={active}
+          onHover={onHover}
+          onSelect={onSelect}
+        />
+      )}
+      {!rightSkipped && (
+        <MarkdownPane
+          side="native"
+          pill={right?.shortLabel || 'right'}
+          title={rightTitle}
+          elements={result.elements.native}
+          hiddenTypes={hiddenTypes}
+          active={active}
+          onHover={onHover}
+          onSelect={onSelect}
+        />
+      )}
     </div>
   )
 }

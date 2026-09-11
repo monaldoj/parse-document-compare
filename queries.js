@@ -50,8 +50,9 @@ export const GEMINI_38_ENDPOINT =
 export const DEFAULT_ENDPOINT = GEMINI_38_ENDPOINT
 
 // The two dropdowns choose from this catalog. `kind: 'endpoint'` runs
-// customParseQuery; `kind: 'native'` runs nativeParseQuery. SQL for
-// each kind is shared — endpoint engines differ only by `:endpoint`.
+// customParseQuery; `kind: 'native'` runs nativeParseQuery; `kind: 'none'`
+// skips that side so a single parser can run on its own. SQL for each
+// kind is shared — endpoint engines differ only by `:endpoint`.
 export const PARSERS = [
   {
     id: 'gemini-3-8-flash',
@@ -86,6 +87,12 @@ export const PARSERS = [
     label: 'ai_parse_document',
     shortLabel: 'ai_parse_document',
     kind: 'native',
+  },
+  {
+    id: 'none',
+    label: 'No model',
+    shortLabel: 'No model',
+    kind: 'none',
   },
 ]
 
@@ -308,8 +315,9 @@ export function pageImagesQuery({ path }) {
 }
 
 // Dispatch to the builders above. Endpoint engines share one SQL shape;
-// native stays on ai_parse_document.
+// native stays on ai_parse_document. `none` has no statement.
 export function parseQueryFor(parser, { path, pageIndex = 0 }) {
+  if (parser.kind === 'none') return null
   if (parser.kind === 'native') return nativeParseQuery({ path })
   return customParseQuery({ path, endpoint: parser.endpoint, pageIndex })
 }

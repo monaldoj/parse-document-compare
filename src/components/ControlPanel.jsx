@@ -45,6 +45,9 @@ export default function ControlPanel({
   const rightLabel = right?.shortLabel || 'right'
   const mixedPageScope = (left?.kind === 'endpoint' && right?.kind === 'native')
     || (left?.kind === 'native' && right?.kind === 'endpoint')
+  const bothNone = leftParser === 'none' && rightParser === 'none'
+  const dropdownSingle = leftParser === 'none' || rightParser === 'none'
+  const resultSingle = left?.kind === 'none' || right?.kind === 'none'
   const enginesDirty = result && (
     left?.id !== leftParser || right?.id !== rightParser
   )
@@ -54,10 +57,18 @@ export default function ControlPanel({
   // filtered to the page on screen.
   const perPage = result
     ? {
-        custom: result.elements.custom.length,
-        native: result.elements.native.length,
+        custom: left?.kind === 'none' ? null : result.elements.custom.length,
+        native: right?.kind === 'none' ? null : result.elements.native.length,
       }
     : null
+
+  const runLabel = comparing
+    ? 'Parsing…'
+    : enginesDirty
+      ? 'Re-run to apply parser changes'
+      : result
+        ? (dropdownSingle ? 'Re-run parse' : 'Re-run comparison')
+        : (dropdownSingle ? 'Run parse' : 'Run comparison')
 
   return (
     <aside className="sidebar">
@@ -107,6 +118,13 @@ export default function ControlPanel({
           </label>
         </form>
 
+        {bothNone && (
+          <p className="muted">Choose at least one parser to run.</p>
+        )}
+        {dropdownSingle && !bothNone && (
+          <p className="muted">Only the selected parser will run.</p>
+        )}
+
         {error && <p className="error">{error}</p>}
 
         {/* Documents in the volume. Picking one loads a preview; parsing
@@ -148,15 +166,9 @@ export default function ControlPanel({
             type="button"
             className="rerun-btn"
             onClick={onParse}
-            disabled={comparing || loadingPreview}
+            disabled={comparing || loadingPreview || bothNone}
           >
-            {comparing
-              ? 'Parsing…'
-              : enginesDirty
-                ? 'Re-run to apply parser changes'
-                : result
-                  ? 'Re-run comparison'
-                  : 'Run comparison'}
+            {runLabel}
           </button>
         )}
 
@@ -170,7 +182,7 @@ export default function ControlPanel({
                   <th />
                   <th className="side-custom">{leftLabel}</th>
                   <th className="side-native">{rightLabel}</th>
-                  <th>Δ</th>
+                  {!resultSingle && <th>Δ</th>}
                 </tr>
               </thead>
               <tbody>
@@ -178,7 +190,7 @@ export default function ControlPanel({
                   label="Elements (page)"
                   custom={perPage.custom}
                   native={perPage.native}
-                  delta
+                  delta={!resultSingle}
                 />
                 <MetricRow label="Elements (doc)" custom={metrics.custom.elements} native={metrics.native.elements} />
                 <MetricRow label="Pages parsed" custom={metrics.custom.pages} native={metrics.native.pages} />

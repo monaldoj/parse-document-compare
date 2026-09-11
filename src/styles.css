@@ -595,6 +595,10 @@ td.delta.down { color: var(--native); }
   align-items: start;
 }
 
+.compare-grid.single {
+  grid-template-columns: 1fr;
+}
+
 .pane {
   min-width: 0;
   background: var(--panel);

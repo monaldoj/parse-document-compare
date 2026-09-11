@@ -45,6 +45,9 @@ function display(value) {
 export default function JsonDiff({ custom, native, sides }) {
   const leftLabel = sides?.custom?.shortLabel || 'left'
   const rightLabel = sides?.native?.shortLabel || 'right'
+  const leftSkipped = sides?.custom?.kind === 'none'
+  const rightSkipped = sides?.native?.kind === 'none'
+  const single = leftSkipped || rightSkipped
   // 'diff' aligns leaf paths; 'raw' shows the two envelopes verbatim.
   const [mode, setMode] = useState('diff')
   // Hide paths that are identical on both sides — usually most of them.
@@ -71,24 +74,27 @@ export default function JsonDiff({ custom, native, sides }) {
   }, [custom, native])
 
   const shown = onlyDifferences ? rows.filter((r) => r.state !== 'equal') : rows
+  const showDiff = !single && mode === 'diff'
 
   return (
     <div className="json-view">
       <div className="json-toolbar">
-        <div className="view-toggle small">
-          <button
-            type="button"
-            className={mode === 'diff' ? 'active' : ''}
-            onClick={() => setMode('diff')}
-          >Aligned diff</button>
-          <button
-            type="button"
-            className={mode === 'raw' ? 'active' : ''}
-            onClick={() => setMode('raw')}
-          >Raw JSON</button>
-        </div>
+        {!single && (
+          <div className="view-toggle small">
+            <button
+              type="button"
+              className={mode === 'diff' ? 'active' : ''}
+              onClick={() => setMode('diff')}
+            >Aligned diff</button>
+            <button
+              type="button"
+              className={mode === 'raw' ? 'active' : ''}
+              onClick={() => setMode('raw')}
+            >Raw JSON</button>
+          </div>
+        )}
 
-        {mode === 'diff' && (
+        {showDiff && (
           <>
             <span className="pill pill-changed">{counts.changed} changed</span>
             <span className="pill pill-custom">{counts.customOnly} {leftLabel}-only</span>
@@ -104,9 +110,12 @@ export default function JsonDiff({ custom, native, sides }) {
             </label>
           </>
         )}
+        {single && (
+          <span className="muted">Single parser — showing that envelope</span>
+        )}
       </div>
 
-      {mode === 'diff' ? (
+      {showDiff ? (
         <div className="diff-grid">
           <div className="diff-row diff-header">
             <div>JSON path</div>
@@ -126,21 +135,25 @@ export default function JsonDiff({ custom, native, sides }) {
           )}
         </div>
       ) : (
-        <div className="compare-grid">
-          <section className="pane">
-            <header className="pane-head">
-              <span className="pill pill-custom">{leftLabel}</span>
-              <h3>{sides?.custom?.label || 'left'}</h3>
-            </header>
-            <pre className="raw-json">{JSON.stringify(custom, null, 2)}</pre>
-          </section>
-          <section className="pane">
-            <header className="pane-head">
-              <span className="pill pill-native">{rightLabel}</span>
-              <h3>{sides?.native?.label || 'right'}</h3>
-            </header>
-            <pre className="raw-json">{JSON.stringify(native, null, 2)}</pre>
-          </section>
+        <div className={`compare-grid${single ? ' single' : ''}`}>
+          {!leftSkipped && (
+            <section className="pane">
+              <header className="pane-head">
+                <span className="pill pill-custom">{leftLabel}</span>
+                <h3>{sides?.custom?.label || 'left'}</h3>
+              </header>
+              <pre className="raw-json">{JSON.stringify(custom, null, 2)}</pre>
+            </section>
+          )}
+          {!rightSkipped && (
+            <section className="pane">
+              <header className="pane-head">
+                <span className="pill pill-native">{rightLabel}</span>
+                <h3>{sides?.native?.label || 'right'}</h3>
+              </header>
+              <pre className="raw-json">{JSON.stringify(native, null, 2)}</pre>
+            </section>
+          )}
         </div>
       )}
     </div>

@@ -496,6 +496,11 @@ app.post('/api/compare', async (req, res) => {
       error: `unknown parser — choose one of: ${PARSERS.map((p) => p.id).join(', ')}`,
     })
   }
+  const leftActive = leftParser.kind !== 'none'
+  const rightActive = rightParser.kind !== 'none'
+  if (!leftActive && !rightActive) {
+    return res.status(400).json({ error: 'choose at least one parser — both sides are No model' })
+  }
   const token = await getToken()
   if (!token) return res.status(503).json({ error: 'no Databricks credentials' })
 
@@ -530,25 +535,43 @@ app.post('/api/compare', async (req, res) => {
       try {
         const { rows, sql, elapsedMs } = await runSql(query, token)
         if (!rows.length) throw new Error('file not found by read_files')
-        return { side, row: rows[0], sql, elapsedMs, error: null }
+        return { side, row: rows[0], sql, elapsedMs, error: null, skipped: false }
       } catch (err) {
         console.error(`${side} parse failed:`, err.message)
-        return { side, row: {}, sql: renderSql(query), elapsedMs: null, error: err.message }
+        return { side, row: {}, sql: renderSql(query), elapsedMs: null, error: err.message, skipped: false }
       }
     }
 
-    const runParser = (parser) =>
-      runSide(parser.id, parseQueryFor(parser, { path: filePath, pageIndex: page }))
+    const skippedRun = (parser) => ({
+      side: parser.id,
+      row: {},
+      sql: null,
+      elapsedMs: null,
+      error: null,
+      skipped: true,
+    })
+
+    const runParser = (parser) => {
+      if (parser.kind === 'none') return Promise.resolve(skippedRun(parser))
+      return runSide(parser.id, parseQueryFor(parser, { path: filePath, pageIndex: page }))
+    }
 
     // Native first when one side is ai_parse_document: it's the fast,
     // dependency-free side, so a misconfigured volume/warehouse fails in
     // seconds instead of after a multi-minute endpoint call. Same engine
-    // on both sides runs once and is reused.
+    // on both sides runs once and is reused. A `none` side is skipped
+    // entirely so a single parser can run on its own.
     let leftRun
     let rightRun
     if (leftParser.id === rightParser.id) {
       leftRun = await runParser(leftParser)
       rightRun = leftRun
+    } else if (!leftActive) {
+      leftRun = skippedRun(leftParser)
+      rightRun = await runParser(rightParser)
+    } else if (!rightActive) {
+      rightRun = skippedRun(rightParser)
+      leftRun = await runParser(leftParser)
     } else if (leftParser.kind === 'native') {
       leftRun = await runParser(leftParser)
       rightRun = await runParser(rightParser)
@@ -560,16 +583,35 @@ app.post('/api/compare', async (req, res) => {
       rightRun = await runParser(rightParser)
     }
 
-    // Both sides failing means nothing to show — surface it as an error
-    // rather than rendering two empty panes.
-    if (leftRun.error && rightRun.error) {
+    // Nothing to show if every side that was asked to run failed.
+    const leftFailed = Boolean(leftRun.error)
+    const rightFailed = Boolean(rightRun.error)
+    if ((leftActive ? leftFailed : true) && (rightActive ? rightFailed : true)) {
+      const parts = []
+      if (leftActive && leftFailed) parts.push(`${leftParser.label}: ${leftRun.error}`)
+      if (rightActive && rightFailed) parts.push(`${rightParser.label}: ${rightRun.error}`)
       return res.status(502).json({
-        error: `both parsers failed — ${leftParser.label}: ${leftRun.error} | ${rightParser.label}: ${rightRun.error}`,
+        error: parts.length > 1
+          ? `both parsers failed — ${parts.join(' | ')}`
+          : `parse failed — ${parts[0]}`,
       })
     }
 
     // Endpoint queries alias columns as custom_*; native as native_*.
+    const emptyMetrics = {
+      elements: null,
+      pages: null,
+      types: null,
+      version: null,
+      errors: [],
+      durationMs: null,
+      failure: null,
+      skipped: true,
+    }
     const extract = (parser, run) => {
+      if (parser.kind === 'none' || run.skipped) {
+        return { path: null, fileSize: 0, envelope: {}, metrics: emptyMetrics }
+      }
       const prefix = parser.kind === 'native' ? 'native' : 'custom'
       const row = run.row || {}
       return {
@@ -584,6 +626,7 @@ app.post('/api/compare', async (req, res) => {
           errors: parseArray(row[`${prefix}_errors`]),
           durationMs: run.elapsedMs,
           failure: run.error,
+          skipped: false,
         },
       }
     }
@@ -647,8 +690,8 @@ app.post('/api/compare', async (req, res) => {
       },
       // Page-relative boxes + content for the overlay/markdown views.
       elements: {
-        custom: normalizeElements(leftExtract.envelope, page, spaceFor(leftParser)),
-        native: normalizeElements(rightExtract.envelope, page, spaceFor(rightParser)),
+        custom: leftActive ? normalizeElements(leftExtract.envelope, page, spaceFor(leftParser)) : [],
+        native: rightActive ? normalizeElements(rightExtract.envelope, page, spaceFor(rightParser)) : [],
       },
       // Full envelopes for the JSON diff view.
       envelopes: { custom: leftExtract.envelope, native: rightExtract.envelope },
@@ -656,7 +699,14 @@ app.post('/api/compare', async (req, res) => {
       sqlByMethod: { custom: leftRun.sql, native: rightRun.sql },
       // `sql`/`elapsedMs` keep the shape the query overlay expects; the
       // total is the wall clock for both statements run back to back.
-      sql: `-- ${leftParser.label}\n${leftRun.sql}\n\n-- ${rightParser.label}\n${rightRun.sql}`,
+      sql: (() => {
+        const parts = []
+        if (leftRun.sql) parts.push(`-- ${leftParser.label}\n${leftRun.sql}`)
+        if (rightRun.sql && leftParser.id !== rightParser.id) {
+          parts.push(`-- ${rightParser.label}\n${rightRun.sql}`)
+        }
+        return parts.join('\n\n')
+      })(),
       elapsedMs: leftParser.id === rightParser.id
         ? (leftRun.elapsedMs || 0)
         : (leftRun.elapsedMs || 0) + (rightRun.elapsedMs || 0),

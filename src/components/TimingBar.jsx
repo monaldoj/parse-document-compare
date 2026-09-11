@@ -43,6 +43,9 @@ function Row({ side, pill, label, ms, failure, widthPct, faster }) {
 
 function sideCopy(side) {
   if (!side) return { pill: 'parser', label: 'parser' }
+  if (side.kind === 'none') {
+    return { pill: side.shortLabel || 'No model', label: side.label || 'No model' }
+  }
   if (side.kind === 'endpoint') {
     return { pill: side.shortLabel, label: side.endpoint || side.label }
   }
@@ -56,16 +59,18 @@ export default function TimingBar({ result }) {
   const right = result.sides?.native
   const leftCopy = sideCopy(left)
   const rightCopy = sideCopy(right)
+  const leftSkipped = left?.kind === 'none' || custom?.skipped
+  const rightSkipped = right?.kind === 'none' || native?.skipped
   const c = custom.durationMs
   const n = native.durationMs
-  const sameEngine = left?.id && left.id === right?.id
+  const sameEngine = left?.id && left.id === right?.id && !leftSkipped && !rightSkipped
 
-  // Scale both bars against the slower of the two.
+  // Scale both bars against the slower of the two (or the one that ran).
   const max = Math.max(c || 0, n || 0) || 1
   const pct = (ms) => (ms == null ? 0 : Math.max(2, (ms / max) * 100))
 
   // Only claim a winner when both actually produced a time.
-  const bothRan = c != null && n != null && !sameEngine
+  const bothRan = c != null && n != null && !sameEngine && !leftSkipped && !rightSkipped
   const ratio = bothRan && Math.min(c, n) > 0 ? Math.max(c, n) / Math.min(c, n) : null
   const rightFaster = bothRan && n < c
   const mixedPageScope = (left?.kind === 'endpoint' && right?.kind === 'native')
@@ -79,6 +84,9 @@ export default function TimingBar({ result }) {
         {sameEngine && (
           <span className="timing-note">same engine on both sides — parsed once</span>
         )}
+        {(leftSkipped || rightSkipped) && !sameEngine && (
+          <span className="timing-note">single parser — the other side was No model</span>
+        )}
         {ratio != null && ratio >= 1.1 && (
           <span className="timing-summary">
             {rightFaster ? rightCopy.pill : leftCopy.pill} was{' '}
@@ -90,27 +98,33 @@ export default function TimingBar({ result }) {
         )}
       </div>
 
-      <Row
-        side="custom"
-        pill={leftCopy.pill}
-        label={leftCopy.label}
-        ms={c}
-        failure={custom.failure}
-        widthPct={pct(c)}
-        faster={bothRan && !rightFaster}
-      />
-      <Row
-        side="native"
-        pill={rightCopy.pill}
-        label={rightCopy.label}
-        ms={n}
-        failure={native.failure}
-        widthPct={pct(n)}
-        faster={bothRan && rightFaster}
-      />
+      {!leftSkipped && (
+        <Row
+          side="custom"
+          pill={leftCopy.pill}
+          label={leftCopy.label}
+          ms={c}
+          failure={custom.failure}
+          widthPct={pct(c)}
+          faster={bothRan && !rightFaster}
+        />
+      )}
+      {!rightSkipped && (
+        <Row
+          side="native"
+          pill={rightCopy.pill}
+          label={rightCopy.label}
+          ms={n}
+          failure={native.failure}
+          widthPct={pct(n)}
+          faster={bothRan && rightFaster}
+        />
+      )}
 
       <p className="timing-caveat">
-        Measured per statement, run back to back on the same warehouse.{' '}
+        Measured per statement
+        {!leftSkipped && !rightSkipped ? ', run back to back on the same warehouse' : ''}
+        .{' '}
         {mixedPageScope && wholeDocPages > 1 && (
           <>
             The serving endpoint parsed 1 page; <code>ai_parse_document</code> parsed

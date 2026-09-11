@@ -65,33 +65,39 @@ function BoxPane({ side, pill, title, elements, pageImage, hiddenTypes, active, 
 export default function PageViewer({ result, hiddenTypes, active, onHover, onSelect }) {
   const left = result.sides?.custom
   const right = result.sides?.native
+  const leftSkipped = left?.kind === 'none'
+  const rightSkipped = right?.kind === 'none'
   const leftTitle = left?.kind === 'endpoint' ? (left.endpoint || left.label) : (left?.label || result.path.split('/').pop())
   const rightTitle = right?.kind === 'endpoint' ? (right.endpoint || right.label) : (right?.label || 'ai_parse_document')
 
   return (
-    <div className="compare-grid">
-      <BoxPane
-        side="custom"
-        pill={left?.shortLabel || 'left'}
-        title={leftTitle}
-        elements={result.elements.custom}
-        pageImage={result.pageImage}
-        hiddenTypes={hiddenTypes}
-        active={active}
-        onHover={onHover}
-        onSelect={onSelect}
-      />
-      <BoxPane
-        side="native"
-        pill={right?.shortLabel || 'right'}
-        title={rightTitle}
-        elements={result.elements.native}
-        pageImage={result.pageImage}
-        hiddenTypes={hiddenTypes}
-        active={active}
-        onHover={onHover}
-        onSelect={onSelect}
-      />
+    <div className={`compare-grid${leftSkipped || rightSkipped ? ' single' : ''}`}>
+      {!leftSkipped && (
+        <BoxPane
+          side="custom"
+          pill={left?.shortLabel || 'left'}
+          title={leftTitle}
+          elements={result.elements.custom}
+          pageImage={result.pageImage}
+          hiddenTypes={hiddenTypes}
+          active={active}
+          onHover={onHover}
+          onSelect={onSelect}
+        />
+      )}
+      {!rightSkipped && (
+        <BoxPane
+          side="native"
+          pill={right?.shortLabel || 'right'}
+          title={rightTitle}
+          elements={result.elements.native}
+          pageImage={result.pageImage}
+          hiddenTypes={hiddenTypes}
+          active={active}
+          onHover={onHover}
+          onSelect={onSelect}
+        />
+      )}
     </div>
   )
 }
