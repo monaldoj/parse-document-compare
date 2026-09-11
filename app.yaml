@@ -19,8 +19,11 @@
 #                          these images, so this is what makes the
 #                          overlay pixel-exact. The volume must exist.
 #   CUSTOM_ENDPOINT_NAME — Florence serving endpoint (one dropdown option).
-#   PALIGEMMA_ENDPOINT_NAME — PaliGemma serving endpoint (the other
-#                          endpoint option). Both share the same ai_query
+#   PALIGEMMA_ENDPOINT_NAME — PaliGemma serving endpoint.
+#   GEMINI_38_ENDPOINT_NAME — Gemini 3.8 Flash serving endpoint
+#                          (ai-parse-document-gemini). Default comparison
+#                          is this vs native ai_parse_document. All
+#                          custom endpoints share the same ai_query
 #                          contract; only the name differs.
 #   CUSTOM_RENDER_DPI    — the DPI those endpoints rasterize PDF pages at,
 #                          needed to map their boxes onto the page.
@@ -52,5 +55,7 @@ env:
     value: florence-2-large-ft-ai-parse-document
   - name: PALIGEMMA_ENDPOINT_NAME
     value: paligemma2-3b-ai-parse-document
+  - name: GEMINI_38_ENDPOINT_NAME
+    value: ai-parse-document-gemini
   - name: CUSTOM_RENDER_DPI
     value: "200"

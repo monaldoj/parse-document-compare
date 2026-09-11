@@ -29,9 +29,10 @@ export const IMAGE_OUTPUT_PATH =
 export const DOCUMENTS_PATH =
   process.env.DOCUMENTS_PATH || '/Volumes/justinm_demo/bio_track/unstructured'
 
-// Serving-endpoint names. Florence and PaliGemma honor the same
-// ai_query contract — only the endpoint string differs. The UI picks
-// among these (plus native ai_parse_document); it no longer types a name.
+// Serving-endpoint names. Florence, PaliGemma, and both Gemini endpoints
+// honor the same ai_query contract — only the endpoint string differs.
+// The UI picks among these (plus native ai_parse_document); it no longer
+// types a name.
 export const FLORENCE_ENDPOINT =
   process.env.CUSTOM_ENDPOINT_NAME || 'florence-2-large-ft-ai-parse-document'
 
@@ -41,13 +42,24 @@ export const PALIGEMMA_ENDPOINT =
 export const GEMINI_ENDPOINT =
   process.env.GEMINI_ENDPOINT_NAME || 'gemini-3-5-flash-ai-parse-document'
 
+// Gemini 3.8 Flash, served as ai-parse-document-gemini.
+export const GEMINI_38_ENDPOINT =
+  process.env.GEMINI_38_ENDPOINT_NAME || 'ai-parse-document-gemini'
+
 // Kept so existing env / startup logs still have a single default.
-export const DEFAULT_ENDPOINT = FLORENCE_ENDPOINT
+export const DEFAULT_ENDPOINT = GEMINI_38_ENDPOINT
 
 // The two dropdowns choose from this catalog. `kind: 'endpoint'` runs
 // customParseQuery; `kind: 'native'` runs nativeParseQuery. SQL for
-// each kind is shared — two endpoint engines differ only by `:endpoint`.
+// each kind is shared — endpoint engines differ only by `:endpoint`.
 export const PARSERS = [
+  {
+    id: 'gemini-3-8-flash',
+    label: GEMINI_38_ENDPOINT,
+    shortLabel: GEMINI_38_ENDPOINT,
+    kind: 'endpoint',
+    endpoint: GEMINI_38_ENDPOINT,
+  },
   {
     id: 'florence',
     label: FLORENCE_ENDPOINT,
@@ -77,7 +89,7 @@ export const PARSERS = [
   },
 ]
 
-export const DEFAULT_LEFT = 'florence'
+export const DEFAULT_LEFT = 'gemini-3-8-flash'
 export const DEFAULT_RIGHT = 'ai_parse_document'
 
 export function getParser(id) {

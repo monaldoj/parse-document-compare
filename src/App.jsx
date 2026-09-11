@@ -37,8 +37,10 @@ const VIEWS = [
 ]
 
 const FALLBACK_PARSERS = [
+  { id: 'gemini-3-8-flash', label: 'ai-parse-document-gemini', shortLabel: 'ai-parse-document-gemini', kind: 'endpoint', endpoint: 'ai-parse-document-gemini' },
   { id: 'florence', label: 'florence-2-large-ft-ai-parse-document', shortLabel: 'florence-2-large-ft-ai-parse-document', kind: 'endpoint', endpoint: 'florence-2-large-ft-ai-parse-document' },
   { id: 'paligemma', label: 'paligemma2-3b-ai-parse-document', shortLabel: 'paligemma2-3b-ai-parse-document', kind: 'endpoint', endpoint: 'paligemma2-3b-ai-parse-document' },
+  { id: 'gemini', label: 'gemini-3-5-flash-ai-parse-document', shortLabel: 'gemini-3-5-flash-ai-parse-document', kind: 'endpoint', endpoint: 'gemini-3-5-flash-ai-parse-document' },
   { id: 'ai_parse_document', label: 'ai_parse_document', shortLabel: 'ai_parse_document', kind: 'native' },
 ]
 
@@ -52,9 +54,9 @@ export default function App() {
   const [loadingDocuments, setLoadingDocuments] = useState(false)
   const [selectedPath, setSelectedPath] = useState(null)
 
-  // Each pane's parser. Defaults come from /api/config (Florence vs
-  // ai_parse_document, matching the original layout).
-  const [leftParser, setLeftParser] = useState('florence')
+  // Each pane's parser. Defaults come from /api/config (Gemini 3.8 Flash
+  // vs ai_parse_document).
+  const [leftParser, setLeftParser] = useState('gemini-3-8-flash')
   const [rightParser, setRightParser] = useState('ai_parse_document')
   const [parsers, setParsers] = useState(FALLBACK_PARSERS)
 
