@@ -124,16 +124,20 @@ vs 4.63%/1.22% (native) — sub-0.2% agreement.
 
 > **Multi-page caveat.** The custom endpoint's contract parses **one page
 > per call** (`page_index`), while `ai_parse_document` parses the whole
-> document at once. So envelope-wide totals aren't comparable on a
-> multi-page PDF, and the sidebar reports a per-page element count
-> alongside the document totals. Changing page re-runs the comparison.
+> document at once. Choose **All pages** to fan out one `ai_query` per
+> PDF page in a single SQL statement (using the file's real page count,
+> not a hardcoded ceiling) so serving endpoints parse in parallel. After
+> that run, the pager walks the already-parsed pages. Envelope-wide
+> totals are comparable in that mode; on **First page** they are not, so
+> the sidebar also reports a per-page element count.
 
 ---
 
 ## Data & prerequisites
 
 * **Documents** — any PDF / PNG / JPG / JPEG in a Unity Catalog volume
-  (`DOCUMENTS_PATH`).
+  (`DOCUMENTS_PATH`). The sidebar can **upload** a file into that volume
+  (needs `WRITE VOLUME`), then you can parse it.
 * **A page-image volume** (`IMAGE_OUTPUT_PATH`) — must already exist;
   `ai_parse_document` writes rendered pages here. Create it once:
   ```sql
@@ -157,8 +161,11 @@ swapped in from the sidebar.
 
 > **Cost note.** One comparison runs a vision model plus an LLM reformat
 > pass, and a scale-to-zero endpoint may cold-start — expect anywhere
-> from ~25 s (warm) to ~6 min (cold). Results are memoized per
-> (document, endpoint, page); **Re-run comparison** bypasses the cache.
+> from ~25 s (warm) to ~6 min (cold) **per page**. **All pages** fans
+> those calls out in one SQL statement so they run in parallel, but a
+> long PDF still costs one endpoint invocation per page. Results are
+> memoized per (document, endpoint, page or all-pages); **Re-run
+> comparison** bypasses the cache.
 
 ---
 
@@ -268,8 +275,9 @@ Targets are `dev` (default) and `prod` (`-t prod` deploys under
 `/Workspace/Shared`).
 
 **After the first deploy**, grant the app's service principal `READ
-VOLUME` on the documents volume, `READ VOLUME` + `WRITE VOLUME` on the
-page-image volume, and `CAN QUERY` on the serving endpoint. No token is
+VOLUME` **and** `WRITE VOLUME` on the documents volume (uploads write
+here), `READ VOLUME` + `WRITE VOLUME` on the page-image volume, and
+`CAN QUERY` on the serving endpoint. No token is
 needed inside the deployed app — it uses the injected M2M OAuth
 credentials.
 

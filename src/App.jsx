@@ -3,13 +3,15 @@
 //
 // One document, two parsers, three ways to look at the difference:
 //
-//   1. Pick a document to preview it. Choose two parsers, then click
-//      Run comparison -> one SQL statement per side.
+//   1. Upload a PDF/image or pick one from the volume to preview it.
+//      Choose two parsers and whether to parse the first page or all
+//      pages, then click Run comparison -> one SQL statement per side.
 //   2. Toggle the comparison view: Overlay (bounding boxes drawn on the
 //      rendered page), Markdown (the extracted content), or JSON (a
 //      structural diff of the two envelopes).
 //   3. Page through a multi-page PDF. Preview follows the pager; click
-//      Run comparison to parse the page on screen.
+//      Run comparison to parse the page on screen. After an all-pages
+//      parse, the pager walks the already-parsed pages.
 //
 // Overlay and Markdown are both side-by-side: the left dropdown on
 // the left, the right dropdown on the right.
@@ -66,8 +68,10 @@ export default function App() {
   const [comparing, setComparing] = useState(false)
   const [preview, setPreview] = useState(null)
   const [loadingPreview, setLoadingPreview] = useState(false)
+  const [uploading, setUploading] = useState(false)
   const [pageIndex, setPageIndex] = useState(0)
   const [pageCount, setPageCount] = useState(1)
+  const [pageMode, setPageMode] = useState('current')
 
   // Which of the three views is showing.
   const [view, setView] = useState('overlay')
@@ -184,11 +188,17 @@ export default function App() {
     setError(null)
     try {
       const data = await api.compare({
-        path: filePath, left: leftParser, right: rightParser, pageIndex: page, refresh,
+        path: filePath,
+        left: leftParser,
+        right: rightParser,
+        pageIndex: page,
+        pageMode,
+        refresh,
       })
       if (seq !== reqSeq.current) return
       setResult(data)
       setPageCount(data.pageCount || 1)
+      if (data.pageIndex != null) setPageIndex(data.pageIndex)
       // A fresh parse invalidates any element the analyst had pinned.
       setPinned(null)
       setHovered(null)
@@ -197,7 +207,7 @@ export default function App() {
     } finally {
       if (seq === reqSeq.current) setComparing(false)
     }
-  }, [leftParser, rightParser])
+  }, [leftParser, rightParser, pageMode])
 
   // Pick a document — load a preview only. Parsing waits for the
   // sidebar button so the analyst can see the file first.
@@ -225,25 +235,64 @@ export default function App() {
     })
   }
 
-  // Page through a multi-page PDF. Preview follows the pager; parsing
-  // does not — a page change would otherwise overlay the previous page's
-  // boxes. Click Run comparison to parse the page on screen.
+  // Page through a multi-page PDF. After an all-pages parse the result
+  // already holds every page, so the pager swaps locally. Otherwise
+  // preview follows the pager and parsing waits for Run comparison —
+  // a page change would otherwise overlay the previous page's boxes.
+  function withPage(data, page) {
+    const slice = data?.pageCache?.[page] ?? data?.pageCache?.[String(page)]
+    if (!slice) return { ...data, pageIndex: page }
+    return {
+      ...data,
+      pageIndex: page,
+      pageImage: slice.pageImage,
+      pageAspect: slice.pageAspect,
+      sourceFile: slice.sourceFile || data.sourceFile,
+      elements: slice.elements,
+      envelopes: slice.envelopes,
+    }
+  }
+
   function onChangePage(next) {
     const page = Math.max(0, Math.min(pageCount - 1, next))
     if (page === pageIndex || !selectedPath) return
     setPageIndex(page)
-    setResult(null)
     setPinned(null)
     setHovered(null)
+    if (result?.pageMode === 'all' && result.pageCache) {
+      setResult(withPage(result, page))
+      return
+    }
+    setResult(null)
   }
 
-  // Parse the current page. A first run may reuse the server cache;
-  // clicking again on the same engines bypasses it.
+  async function onUploadFile(file) {
+    if (!file) return
+    setUploading(true)
+    setError(null)
+    try {
+      const uploaded = await api.upload({
+        file,
+        directory: documentsPath || config?.documentsPath,
+      })
+      await loadDocuments(documentsPath || uploaded.directory)
+      onSelectDocument(uploaded.path)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  // Parse the current page, or every page when All pages is selected.
+  // A first run may reuse the server cache; clicking again on the same
+  // engines bypasses it.
   function onParse() {
     if (!selectedPath) return
     const sameEngines = result
       && result.sides?.custom?.id === leftParser
       && result.sides?.native?.id === rightParser
+      && result.pageMode === pageMode
     runCompare(selectedPath, pageIndex, Boolean(sameEngines))
   }
 
@@ -284,11 +333,16 @@ export default function App() {
         loadingDocuments={loadingDocuments}
         selectedPath={selectedPath}
         onSelectDocument={onSelectDocument}
+        uploading={uploading}
+        onUploadFile={onUploadFile}
         parsers={parsers}
         leftParser={leftParser}
         rightParser={rightParser}
         setLeftParser={setLeftParser}
         setRightParser={setRightParser}
+        pageMode={pageMode}
+        setPageMode={setPageMode}
+        pageCount={pageCount}
         onParse={onParse}
         comparing={comparing}
         loadingPreview={loadingPreview}
@@ -365,11 +419,17 @@ export default function App() {
           {comparing && (
             <div className="overlay-notice">
               <div className="spinner" />
-              <p>Parsing page {pageIndex + 1}{singleParse ? '…' : ' with both parsers…'}</p>
+              <p>
+                {pageMode === 'all' && pageCount > 1
+                  ? `Parsing all ${pageCount} pages${singleParse ? '…' : ' with both parsers…'}`
+                  : `Parsing page ${pageIndex + 1}${singleParse ? '…' : ' with both parsers…'}`}
+              </p>
               <p className="muted">
-                {singleParse
-                  ? 'The selected parser runs as its own Databricks SQL statement. A serving endpoint runs a vision model plus an LLM reformat pass; a cold scale-to-zero endpoint can take a few minutes.'
-                  : 'Each parser runs as its own statement, one after the other, so their run times can be compared. A serving endpoint runs a vision model plus an LLM reformat pass; a cold scale-to-zero endpoint can take a few minutes.'}
+                {pageMode === 'all' && pageCount > 1
+                  ? 'Serving endpoints fan out one ai_query per page in a single SQL statement so pages run in parallel. Native ai_parse_document already parses the whole document. A cold scale-to-zero endpoint can take several minutes.'
+                  : singleParse
+                    ? 'The selected parser runs as its own Databricks SQL statement. A serving endpoint runs a vision model plus an LLM reformat pass; a cold scale-to-zero endpoint can take a few minutes.'
+                    : 'Each parser runs as its own statement, one after the other, so their run times can be compared. A serving endpoint runs a vision model plus an LLM reformat pass; a cold scale-to-zero endpoint can take a few minutes.'}
               </p>
             </div>
           )}
@@ -379,11 +439,12 @@ export default function App() {
               <h2>Compare two document parsers side by side</h2>
               <p className="muted">
                 Choose a parser for each pane — or <strong>No model</strong> on one
-                side to run a single parser. Pick a PDF or image from the volume
-                to preview it, then click <strong>Run comparison</strong> when
-                you are ready. Each selected side runs as its own Databricks SQL
-                statement so run times, bounding boxes, markdown, and JSON can be
-                compared directly.
+                side to run a single parser. Upload a PDF or image, or pick one
+                from the volume to preview it. Parse the <strong>first page</strong> or
+                fan out <strong>all pages</strong> in parallel, then click{' '}
+                <strong>Run comparison</strong>. Each selected side runs as its own
+                Databricks SQL statement so run times, bounding boxes, markdown, and
+                JSON can be compared directly.
               </p>
             </div>
           )}
@@ -392,6 +453,7 @@ export default function App() {
             <DocumentPreview
               preview={preview}
               pageIndex={pageIndex}
+              pageMode={pageMode}
               loading={loadingPreview}
             />
           )}
@@ -471,9 +533,11 @@ export default function App() {
 
         <div className="status">
           {comparing
-            ? (singleParse ? 'Parsing…' : 'Running both parsers…')
+            ? (pageMode === 'all' && pageCount > 1
+              ? `Parsing all ${pageCount} pages…`
+              : (singleParse ? 'Parsing…' : 'Running both parsers…'))
             : result
-              ? `${result.path.split('/').pop()} · page ${pageIndex + 1} of ${pageCount}`
+              ? `${result.path.split('/').pop()} · page ${pageIndex + 1} of ${pageCount}${result.pageMode === 'all' ? ' · all pages' : ''}`
               : selectedPath
                 ? `Previewing ${selectedPath.split('/').pop()} · page ${pageIndex + 1} of ${pageCount}`
                 : 'No document selected'}

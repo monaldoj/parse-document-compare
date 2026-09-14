@@ -73,8 +73,9 @@ export default function TimingBar({ result }) {
   const bothRan = c != null && n != null && !sameEngine && !leftSkipped && !rightSkipped
   const ratio = bothRan && Math.min(c, n) > 0 ? Math.max(c, n) / Math.min(c, n) : null
   const rightFaster = bothRan && n < c
-  const mixedPageScope = (left?.kind === 'endpoint' && right?.kind === 'native')
-    || (left?.kind === 'native' && right?.kind === 'endpoint')
+  const mixedPageScope = ((left?.kind === 'endpoint' && right?.kind === 'native')
+    || (left?.kind === 'native' && right?.kind === 'endpoint'))
+    && result.pageMode !== 'all'
   const wholeDocPages = Math.max(custom.pages || 0, native.pages || 0)
 
   return (
@@ -129,6 +130,15 @@ export default function TimingBar({ result }) {
           <>
             The serving endpoint parsed 1 page; <code>ai_parse_document</code> parsed
             all {wholeDocPages}.{' '}
+          </>
+        )}
+        {result.pageMode === 'all' && wholeDocPages > 1 && (
+          <>
+            All {wholeDocPages} pages were parsed
+            {left?.kind === 'endpoint' || right?.kind === 'endpoint'
+              ? ' — serving endpoints fanned out in parallel'
+              : ''}
+            .{' '}
           </>
         )}
         A cold scale-to-zero endpoint includes start-up time.

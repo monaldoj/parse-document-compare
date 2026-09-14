@@ -13,7 +13,8 @@
 #
 # The values below have no resource to reference, so they are hardcoded.
 # CHANGE THESE for a different workspace:
-#   DOCUMENTS_PATH       — volume folder holding the PDFs/images to parse
+#   DOCUMENTS_PATH       — volume folder holding the PDFs/images to parse.
+#                          Uploads from the app are written here.
 #   IMAGE_OUTPUT_PATH    — volume ai_parse_document renders page images
 #                          into. Bounding boxes are reported relative to
 #                          these images, so this is what makes the

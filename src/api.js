@@ -51,11 +51,28 @@ export const api = {
   // Preview a document (page count + file URL) without running either parser.
   preview: (path) => post('/api/preview', { path }),
 
-  // B. The comparison — both parsers on one page of one document.
+  // Upload a PDF or image into the documents volume directory.
+  upload: async ({ file, directory }) => {
+    const qs = new URLSearchParams({
+      filename: file.name,
+      directory: directory || '',
+    })
+    const resp = await fetch(`/api/documents/upload?${qs}`, {
+      method: 'POST',
+      headers: { 'Content-Type': file.type || 'application/octet-stream' },
+      body: file,
+    })
+    const data = await resp.json()
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`)
+    return data
+  },
+
+  // B. The comparison — both parsers on one page of one document, or
+  // every page in parallel when `pageMode` is `all`.
   // `refresh` forces a re-parse instead of reusing the server's cached
   // result (a parse costs minutes, so results are memoized by default).
-  compare: ({ path, left, right, pageIndex, refresh }) =>
-    post('/api/compare', { path, left, right, pageIndex, refresh }),
+  compare: ({ path, left, right, pageIndex, pageMode, refresh }) =>
+    post('/api/compare', { path, left, right, pageIndex, pageMode, refresh }),
 
   // C. Page count + rendered page images, without re-running the
   // custom endpoint (used when paging through a PDF).

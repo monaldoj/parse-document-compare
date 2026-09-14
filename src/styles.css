@@ -111,6 +111,51 @@ body {
   cursor: not-allowed;
 }
 
+.field {
+  display: block;
+  margin-bottom: 16px;
+}
+
+.field-label {
+  display: block;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.field-hint {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.scope-toggle {
+  width: 100%;
+  margin-top: 6px;
+}
+
+.scope-toggle button {
+  flex: 1;
+}
+
+.upload-btn {
+  width: 100%;
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.upload-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: #fff;
+}
+.upload-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
 .rerun-btn {
   width: 100%;
   margin-top: 12px;
