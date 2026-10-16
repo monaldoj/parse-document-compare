@@ -125,7 +125,7 @@ export default function TimingBar({ result }) {
         {result.mode === 'rest' ? (
           <>
             Measured per synchronous REST API call
-            {!leftSkipped && !rightSkipped ? ', run back to back' : ''}
+            {!leftSkipped && !rightSkipped ? ', run in parallel on separate compute' : ''}
             .{' '}
           </>
         ) : (

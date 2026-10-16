@@ -10,7 +10,12 @@ const queryListeners = new Set()
 
 function notifyQuery(url, data) {
   if (!data || data.sql == null) return
-  const event = { endpoint: url.split('?')[0], sql: data.sql, elapsedMs: data.elapsedMs }
+  const event = {
+    endpoint: url.split('?')[0],
+    mode: data.mode || null,
+    sql: data.sql,
+    elapsedMs: data.elapsedMs,
+  }
   for (const fn of queryListeners) {
     try { fn(event) } catch {}
   }

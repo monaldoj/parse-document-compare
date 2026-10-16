@@ -738,21 +738,15 @@ app.post('/api/compare', async (req, res) => {
     }
 
     // In REST mode, Model Serving endpoints take the file bytes as base64
-    // in `dataframe_records`. Pre-read the volume file once so the Files
-    // API download isn't counted inside the serving endpoint's inference
-    // latency.
-    let cachedFileBuffer = null
-    let cachedFileError = null
-    const getFileBuffer = async () => {
-      if (cachedFileBuffer) return cachedFileBuffer
-      if (cachedFileError) throw cachedFileError
-      try {
-        cachedFileBuffer = await readVolumeFile(filePath, token)
-        return cachedFileBuffer
-      } catch (err) {
-        cachedFileError = err
-        throw err
+    // in `dataframe_records`. Deduplicate concurrent reads with a shared
+    // promise so parallel endpoint calls only fetch the volume file once,
+    // and pre-read before starting the inference timer.
+    let fileBufferPromise = null
+    const getFileBuffer = () => {
+      if (!fileBufferPromise) {
+        fileBufferPromise = readVolumeFile(filePath, token)
       }
+      return fileBufferPromise
     }
 
     const runRestSide = async (parser) => {
@@ -810,26 +804,37 @@ app.post('/api/compare', async (req, res) => {
 
     // Overlay rasters come from ai_parse_document's imageOutputPath, not
     // from the serving endpoints. When neither dropdown is native, write
-    // those JPEGs first (the same SQL as /api/pages) so the overlay is
-    // populated even though native isn't a selected model. Doing it
-    // before the slow endpoint calls also keeps that work off the
-    // head-to-head timing.
+    // those JPEGs so the overlay is populated even though native isn't a
+    // selected model. In DBSQL mode we run it before the parser statements
+    // so it doesn't contend with the warehouse; in REST mode we run it in
+    // parallel with the serving endpoint calls.
     const needsImagePass = leftParser.kind !== 'native' && rightParser.kind !== 'native'
     let pages = null
+    let imagePassPromise = null
     if (needsImagePass) {
-      try {
-        pages = (await loadNativePageImages(filePath, token, mode)).pages
-      } catch (err) {
-        console.error('page images failed:', err.message)
-        pages = []
+      if (mode === 'rest') {
+        imagePassPromise = loadNativePageImages(filePath, token, mode)
+          .then((r) => r.pages)
+          .catch((err) => {
+            console.error('page images failed:', err.message)
+            return []
+          })
+      } else {
+        try {
+          pages = (await loadNativePageImages(filePath, token, mode)).pages
+        } catch (err) {
+          console.error('page images failed:', err.message)
+          pages = []
+        }
       }
     }
 
-    // Native first when one side is ai_parse_document: it's the fast,
-    // dependency-free side, so a misconfigured volume/warehouse fails in
-    // seconds instead of after a multi-minute endpoint call. Same engine
-    // on both sides runs once and is reused. A `none` side is skipped
-    // entirely so a single parser can run on its own.
+    // In REST mode, each parser runs on its own independent compute
+    // (Document Intelligence service vs Model Serving endpoint), so we
+    // fire both in parallel with Promise.all while still timing each call
+    // individually. In DBSQL mode, both statements share the SQL warehouse,
+    // so we run them sequentially (native first) to avoid warehouse
+    // contention. Same engine on both sides runs once and is reused.
     let leftRun
     let rightRun
     if (leftParser.id === rightParser.id) {
@@ -841,6 +846,16 @@ app.post('/api/compare', async (req, res) => {
     } else if (!rightActive) {
       rightRun = skippedRun(rightParser)
       leftRun = await runParser(leftParser)
+    } else if (mode === 'rest') {
+      if (leftParser.kind === 'endpoint' || rightParser.kind === 'endpoint') {
+        // Pre-warm the volume file buffer before kicking off parallel calls
+        // so neither endpoint's timer or start time waits on the Files API.
+        try { await getFileBuffer() } catch {}
+      }
+      ;[leftRun, rightRun] = await Promise.all([
+        runParser(leftParser),
+        runParser(rightParser),
+      ])
     } else if (leftParser.kind === 'native') {
       leftRun = await runParser(leftParser)
       rightRun = await runParser(rightParser)
@@ -850,6 +865,10 @@ app.post('/api/compare', async (req, res) => {
     } else {
       leftRun = await runParser(leftParser)
       rightRun = await runParser(rightParser)
+    }
+
+    if (imagePassPromise) {
+      pages = await imagePassPromise
     }
 
     // Nothing to show if every side that was asked to run failed.
@@ -990,8 +1009,9 @@ app.post('/api/compare', async (req, res) => {
       envelopes: { custom: leftExtract.envelope, native: rightExtract.envelope },
       // Each method's statement, for the "show parsing queries" overlay.
       sqlByMethod: { custom: leftRun.sql, native: rightRun.sql },
-      // `sql`/`elapsedMs` keep the shape the query overlay expects; the
-      // total is the wall clock for both statements run back to back.
+      // `sql`/`elapsedMs` keep the shape the query overlay expects; in
+      // DBSQL mode the total is the sum of sequential statements, while in
+      // REST mode the two calls run in parallel so wall clock is the max.
       sql: (() => {
         const parts = []
         if (leftRun.sql) parts.push(`-- ${leftParser.label}\n${leftRun.sql}`)
@@ -1002,7 +1022,9 @@ app.post('/api/compare', async (req, res) => {
       })(),
       elapsedMs: leftParser.id === rightParser.id
         ? (leftRun.elapsedMs || 0)
-        : (leftRun.elapsedMs || 0) + (rightRun.elapsedMs || 0),
+        : mode === 'rest'
+          ? Math.max(leftRun.elapsedMs || 0, rightRun.elapsedMs || 0)
+          : (leftRun.elapsedMs || 0) + (rightRun.elapsedMs || 0),
     }
 
     // Only cache a clean run. A parse that failed on one side is usually

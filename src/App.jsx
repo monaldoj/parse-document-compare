@@ -98,11 +98,13 @@ export default function App() {
   // overwrite a newer one (parses take minutes — this matters here).
   const reqSeq = useRef(0)
   const previewSeq = useRef(0)
-  // Latest result's SQL, read when the overlay is switched on so the
-  // seeding effect doesn't have to depend on (and resubscribe for)
+  // Latest result's SQL/REST request, read when the overlay is switched on
+  // so the seeding effect doesn't have to depend on (and resubscribe for)
   // every new result.
   const resultSqlRef = useRef(null)
-  resultSqlRef.current = result ? { sql: result.sql, elapsedMs: result.elapsedMs } : null
+  resultSqlRef.current = result
+    ? { mode: result.mode || 'dbsql', sql: result.sql, elapsedMs: result.elapsedMs }
+    : null
 
   useEffect(() => {
     api.config().then((cfg) => {
@@ -115,9 +117,9 @@ export default function App() {
     }).catch((err) => setError(err.message))
   }, [])
 
-  // While the query overlay is on, append every executed SQL statement
-  // to the history. Subscribing only when on keeps a no-op tap out of
-  // the path; we clear the history when toggled back off.
+  // While the query overlay is on, append every executed SQL statement /
+  // REST request to the history. Subscribing only when on keeps a no-op
+  // tap out of the path; we clear the history when toggled back off.
   //
   // Turning it on seeds the history with the statement behind the
   // result already on screen — otherwise the overlay would sit empty
@@ -127,28 +129,35 @@ export default function App() {
     const seed = resultSqlRef.current
     if (seed?.sql) {
       setQueryLog({
-        history: [{ endpoint: '/api/compare', sql: seed.sql, elapsedMs: seed.elapsedMs }],
+        history: [{
+          endpoint: '/api/compare',
+          mode: seed.mode,
+          sql: seed.sql,
+          elapsedMs: seed.elapsedMs,
+        }],
         idx: 0,
       })
+    } else {
+      setQueryLog({ history: [], idx: -1 })
     }
     return api.onQuery((q) => {
       setQueryLog((cur) => {
         const history = [...cur.history, q].slice(-QUERY_HISTORY_MAX)
-        const wasAtNewest = cur.idx === cur.history.length - 1 || cur.idx === -1
-        const evicted = cur.history.length === QUERY_HISTORY_MAX
-        const idx = wasAtNewest
-          ? history.length - 1
-          : Math.max(0, cur.idx - (evicted ? 1 : 0))
-        return { history, idx }
+        // Always jump to the newest query when a fresh comparison runs so
+        // switching from REST -> DBSQL (or vice versa) immediately displays
+        // the latest run's query instead of staying parked on an older entry.
+        return { history, idx: history.length - 1 }
       })
     })
   }, [showQueries])
 
-  // Arrow through the query history. Clamped to the available range.
-  function stepQuery(delta) {
+  // Arrow through the query history. Clamped to the visible range.
+  function stepQuery(delta, maxLen) {
     setQueryLog((cur) => {
-      if (!cur.history.length) return cur
-      const idx = Math.min(cur.history.length - 1, Math.max(0, cur.idx + delta))
+      const len = maxLen ?? cur.history.length
+      if (!len) return cur
+      const base = Math.min(len - 1, Math.max(0, cur.idx))
+      const idx = Math.min(len - 1, Math.max(0, base + delta))
       return { ...cur, idx }
     })
   }
@@ -383,7 +392,7 @@ export default function App() {
                 {mode === 'rest'
                   ? singleParse
                     ? 'Calling the selected parser directly via its real-time REST API. A serving endpoint runs a vision model plus an LLM reformat pass; a cold scale-to-zero endpoint can take a few minutes.'
-                    : 'Each parser is called sequentially via its real-time REST API (/api/2.0/ai-functions/ai-parse-document or /serving-endpoints/<name>/invocations) so their run times can be compared.'
+                    : 'Calling both parsers in parallel via their real-time REST APIs (/api/2.0/ai-functions/ai-parse-document and /serving-endpoints/<name>/invocations) and timing each call independently.'
                   : singleParse
                     ? 'The selected parser runs as its own Databricks SQL statement. A serving endpoint runs a vision model plus an LLM reformat pass; a cold scale-to-zero endpoint can take a few minutes.'
                     : 'Each parser runs as its own statement, one after the other, so their run times can be compared. A serving endpoint runs a vision model plus an LLM reformat pass; a cold scale-to-zero endpoint can take a few minutes.'}
@@ -445,44 +454,72 @@ export default function App() {
           )}
         </div>
 
-        {/* Live SQL overlay — the parsing statement that just ran. */}
+        {/* Live SQL / REST request overlay — the parsing statement that just ran. */}
         {showQueries && (
           <div className="query-overlay">
-            {queryLog.history.length ? (
-              (() => {
-                const cur = queryLog.history[queryLog.idx]
-                const atOldest = queryLog.idx <= 0
-                const atNewest = queryLog.idx >= queryLog.history.length - 1
+            {(() => {
+              // Filter history to match the active mode (or current result's mode)
+              // so toggling between DBSQL and REST API never shows a stale REST
+              // payload when inspecting DBSQL queries (or vice versa).
+              const activeMode = result?.mode || mode
+              const matching = queryLog.history.filter(
+                (item) => !item.mode || item.mode === activeMode,
+              )
+              // Fall back to the current result's sql if it matches the mode
+              // and isn't in history yet, or to full history if nothing matches.
+              const list = matching.length
+                ? matching
+                : (result?.sql && (result.mode || 'dbsql') === activeMode)
+                  ? [{
+                      endpoint: '/api/compare',
+                      mode: activeMode,
+                      sql: result.sql,
+                      elapsedMs: result.elapsedMs,
+                    }]
+                  : queryLog.history
+              if (!list.length) {
                 return (
-                  <>
-                    <div className="query-head">
-                      <span className="query-endpoint">{cur.endpoint}</span>
-                      {cur.elapsedMs != null && (
-                        <span className="query-time">{cur.elapsedMs.toLocaleString()} ms</span>
-                      )}
-                      <span className="query-nav">
-                        <button
-                          type="button"
-                          onClick={() => stepQuery(-1)}
-                          disabled={atOldest}
-                          aria-label="Previous query"
-                        >←</button>
-                        <span className="query-pos">{queryLog.idx + 1}/{queryLog.history.length}</span>
-                        <button
-                          type="button"
-                          onClick={() => stepQuery(1)}
-                          disabled={atNewest}
-                          aria-label="Next query"
-                        >→</button>
-                      </span>
-                    </div>
-                    <pre className="query-sql">{cur.sql}</pre>
-                  </>
+                  <span className="muted">
+                    {activeMode === 'rest'
+                      ? 'Waiting for a REST request…'
+                      : 'Waiting for a parsing query…'}
+                  </span>
                 )
-              })()
-            ) : (
-              <span className="muted">Waiting for a parsing query…</span>
-            )}
+              }
+              const clampedIdx = Math.min(list.length - 1, Math.max(0, queryLog.idx))
+              const cur = list[clampedIdx]
+              const atOldest = clampedIdx <= 0
+              const atNewest = clampedIdx >= list.length - 1
+              return (
+                <>
+                  <div className="query-head">
+                    <span className="query-endpoint">
+                      {cur.endpoint}
+                      {cur.mode ? ` (${cur.mode === 'rest' ? 'REST API' : 'DBSQL'})` : ''}
+                    </span>
+                    {cur.elapsedMs != null && (
+                      <span className="query-time">{cur.elapsedMs.toLocaleString()} ms</span>
+                    )}
+                    <span className="query-nav">
+                      <button
+                        type="button"
+                        onClick={() => stepQuery(-1, list.length)}
+                        disabled={atOldest}
+                        aria-label="Previous query"
+                      >←</button>
+                      <span className="query-pos">{clampedIdx + 1}/{list.length}</span>
+                      <button
+                        type="button"
+                        onClick={() => stepQuery(1, list.length)}
+                        disabled={atNewest}
+                        aria-label="Next query"
+                      >→</button>
+                    </span>
+                  </div>
+                  <pre className="query-sql">{cur.sql}</pre>
+                </>
+              )
+            })()}
           </div>
         )}
 
