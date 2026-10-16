@@ -73,15 +73,14 @@ export default function TimingBar({ result }) {
   const bothRan = c != null && n != null && !sameEngine && !leftSkipped && !rightSkipped
   const ratio = bothRan && Math.min(c, n) > 0 ? Math.max(c, n) / Math.min(c, n) : null
   const rightFaster = bothRan && n < c
-  const mixedPageScope = ((left?.kind === 'endpoint' && right?.kind === 'native')
-    || (left?.kind === 'native' && right?.kind === 'endpoint'))
-    && result.pageMode !== 'all'
+  const mixedPageScope = (left?.kind === 'endpoint' && right?.kind === 'native')
+    || (left?.kind === 'native' && right?.kind === 'endpoint')
   const wholeDocPages = Math.max(custom.pages || 0, native.pages || 0)
 
   return (
     <div className="timing-bar">
       <div className="timing-head">
-        <h3>Parse time</h3>
+        <h3>Parse time ({result.mode === 'rest' ? 'REST API' : 'DBSQL'})</h3>
         {sameEngine && (
           <span className="timing-note">same engine on both sides — parsed once</span>
         )}
@@ -123,22 +122,23 @@ export default function TimingBar({ result }) {
       )}
 
       <p className="timing-caveat">
-        Measured per statement
-        {!leftSkipped && !rightSkipped ? ', run back to back on the same warehouse' : ''}
-        .{' '}
+        {result.mode === 'rest' ? (
+          <>
+            Measured per synchronous REST API call
+            {!leftSkipped && !rightSkipped ? ', run back to back' : ''}
+            .{' '}
+          </>
+        ) : (
+          <>
+            Measured per statement
+            {!leftSkipped && !rightSkipped ? ', run back to back on the same warehouse' : ''}
+            .{' '}
+          </>
+        )}
         {mixedPageScope && wholeDocPages > 1 && (
           <>
             The serving endpoint parsed 1 page; <code>ai_parse_document</code> parsed
             all {wholeDocPages}.{' '}
-          </>
-        )}
-        {result.pageMode === 'all' && wholeDocPages > 1 && (
-          <>
-            All {wholeDocPages} pages were parsed
-            {left?.kind === 'endpoint' || right?.kind === 'endpoint'
-              ? ' — serving endpoints fanned out in parallel'
-              : ''}
-            .{' '}
           </>
         )}
         A cold scale-to-zero endpoint includes start-up time.

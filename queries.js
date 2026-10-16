@@ -99,6 +99,24 @@ export const PARSERS = [
 export const DEFAULT_LEFT = 'gemini-3-8-flash'
 export const DEFAULT_RIGHT = 'ai_parse_document'
 
+// Execution modes: DBSQL (runs ai_parse_document / ai_query on the SQL
+// Warehouse) vs Real-time REST API (calls /api/2.0/ai-functions/ai-parse-document
+// and /serving-endpoints/<name>/invocations directly).
+export const EXECUTION_MODES = [
+  {
+    id: 'dbsql',
+    label: 'DBSQL',
+    description: 'Run via SQL Warehouse (ai_parse_document & ai_query)',
+  },
+  {
+    id: 'rest',
+    label: 'REST API',
+    description: 'Run via real-time REST APIs (/api/2.0/ai-functions & /serving-endpoints)',
+  },
+]
+
+export const DEFAULT_MODE = 'dbsql'
+
 export function getParser(id) {
   return PARSERS.find((p) => p.id === id) || null
 }
@@ -229,79 +247,6 @@ export function customParseQuery({ path, endpoint, pageIndex = 0 }) {
 }
 
 // ============================================================
-// A2. Custom endpoint, every page in parallel.
-//
-// Serving endpoints honor a one-page-per-call contract (`page_limit=1`,
-// `page_index=N`). To parse a whole PDF we explode one row per page
-// index and let the warehouse run `ai_query` across those rows in one
-// statement — the same fan-out the source notebook uses.
-//
-// `maxPageIndex` is the PDF's last 0-based page (pageCount - 1), from
-// the file itself. A hardcoded ceiling (e.g. 7) would either miss pages
-// or spend `ai_query` calls on empty slots; images only keep
-// `page_index = 0`.
-//
-// The serving endpoint's return type already has `.response`. Passing
-// `failOnError => false` wraps that in `{result, errorMessage}` and
-// `.response` then fails with FIELD_NOT_FOUND — so this call matches
-// the one-page query and the source notebook: `ai_query(...).response`.
-// ============================================================
-export function customFanoutParseQuery({ path, endpoint, maxPageIndex = 0 }) {
-  const statement = `${FILES_CTE},
-    pages AS (
-      SELECT f.*, page_index
-      FROM files f
-      LATERAL VIEW explode(sequence(0, :maxPageIndex)) AS page_index
-      WHERE mime_type = 'application/pdf' OR page_index = 0
-    ),
-    parsed AS (
-      SELECT
-        path,
-        page_index,
-        length(content) AS file_size,
-        from_json(
-          ai_query(
-            :endpoint,
-            named_struct(
-              'file_b64', file_b64,
-              'mime_type', mime_type,
-              'file_path', path,
-              'file_name', regexp_extract(path, '[^/]+$', 0),
-              'file_size', length(content),
-              'page_limit', 1,
-              'page_index', page_index,
-              'reformat', true
-            )
-          ).response,
-          :schema
-        ) AS custom
-      FROM pages
-    )
-    SELECT
-      path,
-      page_index,
-      file_size,
-      size(custom.document.elements) AS custom_elements,
-      size(custom.document.pages)    AS custom_pages,
-      array_sort(array_distinct(transform(custom.document.elements, x -> x.type))) AS custom_types,
-      custom.metadata.version AS custom_version,
-      custom.error_status     AS custom_errors,
-      to_json(custom)         AS custom_json
-    FROM parsed
-    ORDER BY page_index
-  `
-  return {
-    statement,
-    parameters: [
-      param('path', path),
-      param('endpoint', endpoint),
-      param('maxPageIndex', maxPageIndex, 'INT'),
-      param('schema', PARSE_SCHEMA),
-    ],
-  }
-}
-
-// ============================================================
 // B. Native ai_parse_document, on its own.
 //
 // Parses the whole document in one shot (unlike the custom endpoint's
@@ -389,13 +334,73 @@ export function pageImagesQuery({ path }) {
 
 // Dispatch to the builders above. Endpoint engines share one SQL shape;
 // native stays on ai_parse_document. `none` has no statement.
-// `pageMode === 'all'` fans out every PDF page in one statement; a
-// single-page image (maxPageIndex 0) stays on the one-page query.
-export function parseQueryFor(parser, { path, pageIndex = 0, pageMode = 'current', maxPageIndex = 0 }) {
+export function parseQueryFor(parser, { path, pageIndex = 0 }) {
   if (parser.kind === 'none') return null
   if (parser.kind === 'native') return nativeParseQuery({ path })
-  if (pageMode === 'all' && maxPageIndex > 0) {
-    return customFanoutParseQuery({ path, endpoint: parser.endpoint, maxPageIndex })
-  }
   return customParseQuery({ path, endpoint: parser.endpoint, pageIndex })
+}
+
+// ============================================================
+// C. Real-time REST API payloads.
+//
+//   • native   → POST /api/2.0/ai-functions/ai-parse-document
+//                Passes the UC volume path in `content` plus `options`
+//                with schema version 2.0 and `image_output_path`.
+//   • endpoint → POST /serving-endpoints/<name>/invocations
+//                Passes `dataframe_records: [makeEndpointPayload(...)]`,
+//                matching `query_client.serving_endpoints.query(...)`.
+// ============================================================
+export function makeNativeRestPayload({ path }) {
+  return {
+    content: path,
+    options: {
+      version: '2.0',
+      image_output_path: IMAGE_OUTPUT_PATH,
+    },
+  }
+}
+
+export function makeEndpointPayload({
+  path,
+  fileBuffer,
+  mimeType,
+  pageIndex = 0,
+  pageLimit = 1,
+}) {
+  return {
+    file_b64: fileBuffer.toString('base64'),
+    mime_type: mimeType,
+    file_path: path,
+    file_name: path.split('/').pop(),
+    file_size: fileBuffer.length,
+    page_limit: pageLimit,
+    page_index: pageIndex,
+    reformat: true,
+  }
+}
+
+// Display-friendly representation of a REST API call for the UI query
+// overlay (analogous to renderSql in server.js). Truncates `file_b64` so
+// multi-megabyte base64 strings don't flood the overlay.
+export function renderRestRequest(parser, { path, mimeType, fileSize = 0, pageIndex = 0 }) {
+  if (!parser || parser.kind === 'none') return null
+  if (parser.kind === 'native') {
+    const body = makeNativeRestPayload({ path })
+    return `POST /api/2.0/ai-functions/ai-parse-document\n${JSON.stringify(body, null, 2)}`
+  }
+  const previewRecord = {
+    file_b64: `<base64 · ${Number(fileSize || 0).toLocaleString()} bytes>`,
+    mime_type: mimeType,
+    file_path: path,
+    file_name: path.split('/').pop(),
+    file_size: Number(fileSize || 0),
+    page_limit: 1,
+    page_index: pageIndex,
+    reformat: true,
+  }
+  return `POST /serving-endpoints/${parser.endpoint}/invocations\n${JSON.stringify(
+    { dataframe_records: [previewRecord] },
+    null,
+    2,
+  )}`
 }

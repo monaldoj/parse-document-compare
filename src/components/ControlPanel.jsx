@@ -1,12 +1,11 @@
 // ============================================================
 // components/ControlPanel.jsx — sidebar
 //
-// Top to bottom: the volume directory to browse, upload, the documents
-// in it, the two parser dropdowns, first-page vs all-pages, and — once
-// a comparison has run — the macro metrics and the element type filter.
-// The SQL toggle is pinned to the footer.
+// Top to bottom: the volume directory to browse, the documents in it,
+// the two parser dropdowns (one per pane), and — once a comparison has
+// run — the macro metrics and the element type filter. The SQL toggle
+// is pinned to the footer.
 // ============================================================
-import { useRef } from 'react'
 import { colorForType } from './colors.js'
 
 // One metric row: the two parsers side by side, plus the delta where
@@ -34,32 +33,29 @@ function MetricRow({ label, custom, native, delta = false }) {
 export default function ControlPanel({
   documentsPath, setDocumentsPath, onReloadDocuments,
   documents, loadingDocuments, selectedPath, onSelectDocument,
-  uploading, onUploadFile,
   parsers, leftParser, rightParser, setLeftParser, setRightParser,
-  pageMode, setPageMode, pageCount,
+  mode, setMode,
   onParse, comparing, loadingPreview, result, error,
   presentTypes, hiddenTypes, onToggleType,
   showQueries, onToggleQueries,
 }) {
-  const fileInput = useRef(null)
   const metrics = result?.metrics
   const left = result?.sides?.custom
   const right = result?.sides?.native
   const leftLabel = left?.shortLabel || 'left'
   const rightLabel = right?.shortLabel || 'right'
-  const mixedPageScope = ((left?.kind === 'endpoint' && right?.kind === 'native')
-    || (left?.kind === 'native' && right?.kind === 'endpoint'))
-    && result?.pageMode !== 'all'
+  const mixedPageScope = (left?.kind === 'endpoint' && right?.kind === 'native')
+    || (left?.kind === 'native' && right?.kind === 'endpoint')
   const bothNone = leftParser === 'none' && rightParser === 'none'
   const dropdownSingle = leftParser === 'none' || rightParser === 'none'
   const resultSingle = left?.kind === 'none' || right?.kind === 'none'
-  const enginesDirty = result && (
-    left?.id !== leftParser || right?.id !== rightParser || result.pageMode !== pageMode
-  )
+  const modeChanged = Boolean(result && (result.mode || 'dbsql') !== mode)
+  const parsersChanged = Boolean(result && (left?.id !== leftParser || right?.id !== rightParser))
+  const enginesDirty = modeChanged || parsersChanged
   // An endpoint parses ONE page per call while ai_parse_document parses
   // the whole document, so envelope-wide totals aren't comparable on a
-  // multi-page PDF unless we fanned out every page. The per-page counts
-  // are — both sides are already filtered to the page on screen.
+  // multi-page PDF. The per-page counts are — both sides are already
+  // filtered to the page on screen.
   const perPage = result
     ? {
         custom: left?.kind === 'none' ? null : result.elements.custom.length,
@@ -68,13 +64,13 @@ export default function ControlPanel({
     : null
 
   const runLabel = comparing
-    ? (pageMode === 'all' && pageCount > 1 ? `Parsing ${pageCount} pages…` : 'Parsing…')
-    : enginesDirty
-      ? 'Re-run to apply parser changes'
-      : result
-        ? (dropdownSingle ? 'Re-run parse' : 'Re-run comparison')
-        : pageMode === 'all' && pageCount > 1
-          ? (dropdownSingle ? `Parse all ${pageCount} pages` : `Compare all ${pageCount} pages`)
+    ? 'Parsing…'
+    : modeChanged && !parsersChanged
+      ? `Re-run with ${mode === 'rest' ? 'REST API' : 'DBSQL'}`
+      : enginesDirty
+        ? 'Re-run to apply parser changes'
+        : result
+          ? (dropdownSingle ? 'Re-run parse' : 'Re-run comparison')
           : (dropdownSingle ? 'Run parse' : 'Run comparison')
 
   return (
@@ -82,10 +78,39 @@ export default function ControlPanel({
       <div className="sidebar-content">
         <h1>Parser Compare</h1>
         <p className="subtitle">
-          Two parsers side by side on Databricks SQL
+          {mode === 'rest'
+            ? 'Two parsers side by side via Real-time REST API'
+            : 'Two parsers side by side on Databricks SQL'}
         </p>
 
         <form onSubmit={(e) => { e.preventDefault(); onReloadDocuments() }}>
+          <div className="mode-field">
+            <span className="field-label">Execution mode</span>
+            <div className="mode-switch" role="group" aria-label="Execution mode">
+              <button
+                type="button"
+                className={mode === 'dbsql' ? 'active' : ''}
+                onClick={() => setMode('dbsql')}
+                disabled={comparing}
+              >
+                DBSQL
+              </button>
+              <button
+                type="button"
+                className={mode === 'rest' ? 'active' : ''}
+                onClick={() => setMode('rest')}
+                disabled={comparing}
+              >
+                REST API
+              </button>
+            </div>
+            <span className="mode-hint">
+              {mode === 'rest'
+                ? 'Calls /api/2.0/ai-functions/ai-parse-document & /serving-endpoints directly'
+                : 'Runs ai_parse_document() & ai_query() on the SQL Warehouse'}
+            </span>
+          </div>
+
           <label>
             Volume directory
             <input
@@ -123,35 +148,6 @@ export default function ControlPanel({
               ))}
             </select>
           </label>
-
-          <div className="field">
-            <span className="field-label">Pages to parse</span>
-            <div className="view-toggle small scope-toggle">
-              <button
-                type="button"
-                className={pageMode === 'current' ? 'active' : ''}
-                onClick={() => setPageMode('current')}
-                disabled={comparing}
-              >
-                First page
-              </button>
-              <button
-                type="button"
-                className={pageMode === 'all' ? 'active' : ''}
-                onClick={() => setPageMode('all')}
-                disabled={comparing}
-              >
-                All pages
-              </button>
-            </div>
-            <p className="field-hint">
-              {pageMode === 'all'
-                ? (pageCount > 1
-                  ? `Fan out all ${pageCount} pages in one SQL statement so serving endpoints parse them in parallel.`
-                  : 'Images are a single page. For PDFs this fans out every page in parallel.')
-                : 'Parse the page on screen (page 1 until you page through the preview). Same as before.'}
-            </p>
-          </div>
         </form>
 
         {bothNone && (
@@ -172,26 +168,6 @@ export default function ControlPanel({
               {loadingDocuments ? '…' : `${documents.length}`}
             </span>
           </h2>
-          <input
-            ref={fileInput}
-            type="file"
-            accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg"
-            hidden
-            onChange={(e) => {
-              const file = e.target.files?.[0]
-              e.target.value = ''
-              if (file) onUploadFile(file)
-            }}
-          />
-          <button
-            type="button"
-            className="upload-btn"
-            onClick={() => fileInput.current?.click()}
-            disabled={comparing || uploading || loadingDocuments}
-          >
-            {uploading ? 'Uploading…' : 'Upload PDF or image'}
-          </button>
-          <p className="field-hint">Writes into the volume directory above, then you can parse it.</p>
           {loadingDocuments ? (
             <p className="muted">Listing volume…</p>
           ) : !documents.length ? (
@@ -204,7 +180,7 @@ export default function ControlPanel({
                     type="button"
                     className={`doc-row ${selectedPath === doc.path ? 'selected' : ''}`}
                     onClick={() => onSelectDocument(doc.path)}
-                    disabled={comparing || uploading}
+                    disabled={comparing}
                   >
                     <span className="doc-name">{doc.name}</span>
                     <span className="doc-size">
@@ -222,7 +198,7 @@ export default function ControlPanel({
             type="button"
             className="rerun-btn"
             onClick={onParse}
-            disabled={comparing || loadingPreview || uploading || bothNone}
+            disabled={comparing || loadingPreview || bothNone}
           >
             {runLabel}
           </button>
@@ -259,9 +235,7 @@ export default function ControlPanel({
               <p className="metrics-note">
                 Serving endpoints parse one page per call;{' '}
                 <code>ai_parse_document</code> parses the whole document at
-                once. Only the per-page row compares like with like. Choose{' '}
-                <strong>All pages</strong> to fan out the endpoint across
-                every page.
+                once. Only the per-page row compares like with like.
               </p>
             )}
 
@@ -310,11 +284,11 @@ export default function ControlPanel({
         )}
       </div>
 
-      {/* Pinned footer — reveal the parsing SQL that actually ran. */}
+      {/* Pinned footer — reveal the parsing SQL or REST request that actually ran. */}
       <div className="sidebar-footer">
         <label className="footer-toggle">
           <input type="checkbox" checked={showQueries} onChange={onToggleQueries} />
-          <span>Show parsing queries</span>
+          <span>{mode === 'rest' ? 'Show REST requests' : 'Show parsing queries'}</span>
         </label>
       </div>
     </aside>

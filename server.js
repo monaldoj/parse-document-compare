@@ -9,6 +9,8 @@ import {
   DEFAULT_ENDPOINT,
   DEFAULT_LEFT,
   DEFAULT_RIGHT,
+  DEFAULT_MODE,
+  EXECUTION_MODES,
   IMAGE_OUTPUT_PATH,
   CUSTOM_RENDER_DPI,
   PARSE_SCHEMA,
@@ -16,6 +18,9 @@ import {
   getParser,
   parseQueryFor,
   pageImagesQuery,
+  makeNativeRestPayload,
+  makeEndpointPayload,
+  renderRestRequest,
 } from './queries.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -168,37 +173,12 @@ async function executeSql({ statement, parameters = [] }, token, { timeoutMs = 9
     throw new Error(`SQL state ${data.status?.state}: ${msg?.slice?.(0, 400) || msg}`)
   }
 
-  if (data.manifest?.truncated) {
-    throw new Error('SQL result was truncated — try fewer pages or a smaller document')
-  }
-
   const columns = data.manifest?.schema?.columns?.map((c) => c.name) || []
-  const toObjects = (arr) => (arr || []).map((row) => {
+  const rows = (data.result?.data_array || []).map((row) => {
     const obj = {}
     columns.forEach((col, i) => { obj[col] = row[i] })
     return obj
   })
-  const rows = toObjects(data.result?.data_array)
-  // Fan-out parses return one row per page; INLINE results can span
-  // multiple chunks. Follow the links so we don't silently drop pages.
-  let nextLink = data.result?.next_chunk_internal_link
-  let nextIndex = data.result?.next_chunk_index
-  const seenChunks = new Set()
-  while (nextLink || nextIndex != null) {
-    const key = nextLink || `idx:${nextIndex}`
-    if (seenChunks.has(key) || seenChunks.size > 200) break
-    seenChunks.add(key)
-    const url = nextLink
-      ? (nextLink.startsWith('http') ? nextLink : `${DB_HOST}${nextLink}`)
-      : `${DB_HOST}/api/2.0/sql/statements/${statementId}/result/chunks/${nextIndex}`
-    const chunkResp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
-    if (!chunkResp.ok) throw new Error(`SQL chunk HTTP ${chunkResp.status}`)
-    const chunk = await chunkResp.json()
-    rows.push(...toObjects(chunk.data_array || chunk.result?.data_array))
-    nextLink = chunk.next_chunk_internal_link || chunk.result?.next_chunk_internal_link || null
-    nextIndex = chunk.next_chunk_index ?? chunk.result?.next_chunk_index
-    if (nextIndex == null && !nextLink) break
-  }
   return rows
 }
 
@@ -233,6 +213,111 @@ async function runSql(query, token, options) {
 }
 
 // ------------------------------------------------------------
+// Real-time REST API execution — calls Databricks Document Intelligence
+// (`POST /api/2.0/ai-functions/ai-parse-document`) for native
+// `ai_parse_document` and Model Serving (`POST /serving-endpoints/<name>/invocations`)
+// for custom endpoints like `ai-parse-document-gemini`.
+// ------------------------------------------------------------
+function formatErrorStatusItem(item) {
+  if (typeof item === 'string') return item
+  if (item && typeof item === 'object') {
+    if (item.error_message) {
+      return item.page_id != null
+        ? `Page ${item.page_id}: ${item.error_message}`
+        : String(item.error_message)
+    }
+    return JSON.stringify(item)
+  }
+  return String(item)
+}
+
+function envelopeToRow(parser, envelope, { path: filePath, fileSize = 0 }) {
+  const prefix = parser.kind === 'native' ? 'native' : 'custom'
+  const elements = Array.isArray(envelope?.document?.elements) ? envelope.document.elements : []
+  const pages = Array.isArray(envelope?.document?.pages) ? envelope.document.pages : []
+  const types = [...new Set(elements.map((e) => e?.type).filter(Boolean))].sort()
+  const version = envelope?.metadata?.version ?? null
+  const rawErrors = Array.isArray(envelope?.error_status) ? envelope.error_status : []
+  const errors = rawErrors.map(formatErrorStatusItem)
+  const resolvedSize = Number(fileSize || envelope?.metadata?.file_metadata?.file_size || 0)
+  return {
+    path: filePath,
+    file_size: resolvedSize,
+    [`${prefix}_elements`]: elements.length,
+    [`${prefix}_pages`]: pages.length,
+    [`${prefix}_types`]: types,
+    [`${prefix}_version`]: version,
+    [`${prefix}_errors`]: errors,
+    [`${prefix}_json`]: JSON.stringify(envelope || {}),
+  }
+}
+
+async function executeNativeRest({ path: filePath }, token, { timeoutMs = 900000 } = {}) {
+  const body = makeNativeRestPayload({ path: filePath })
+  const started = Date.now()
+  const resp = await fetch(`${DB_HOST}/api/2.0/ai-functions/ai-parse-document`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  const elapsedMs = Date.now() - started
+  if (!resp.ok) {
+    const text = await resp.text()
+    throw new Error(`ai_parse_document REST HTTP ${resp.status}: ${text.slice(0, 400)}`)
+  }
+  const envelope = await resp.json()
+  return { envelope, elapsedMs }
+}
+
+async function executeEndpointRest(
+  { endpoint, path: filePath, fileBuffer, pageIndex = 0 },
+  token,
+  { timeoutMs = 900000 } = {},
+) {
+  const record = makeEndpointPayload({
+    path: filePath,
+    fileBuffer,
+    mimeType: mimeForPath(filePath),
+    pageIndex,
+    pageLimit: 1,
+  })
+  const started = Date.now()
+  const resp = await fetch(
+    `${DB_HOST}/serving-endpoints/${encodeURIComponent(endpoint)}/invocations`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ dataframe_records: [record] }),
+      signal: AbortSignal.timeout(timeoutMs),
+    },
+  )
+  const elapsedMs = Date.now() - started
+  if (!resp.ok) {
+    const text = await resp.text()
+    throw new Error(`Serving endpoint HTTP ${resp.status}: ${text.slice(0, 400)}`)
+  }
+  const data = await resp.json()
+  // Matches: response_text = response.predictions[0]["response"]
+  const pred = Array.isArray(data?.predictions) ? data.predictions[0] : data?.predictions ?? data
+  const responseText =
+    pred && typeof pred === 'object' && 'response' in pred ? pred.response : pred
+  let envelope = {}
+  if (typeof responseText === 'string' && responseText !== 'null') {
+    envelope = JSON.parse(responseText)
+  } else if (responseText && typeof responseText === 'object') {
+    envelope = responseText
+  }
+  return { envelope: envelope && typeof envelope === 'object' ? envelope : {}, elapsedMs }
+}
+
+// ------------------------------------------------------------
 // Unity Catalog Files API — read a volume file's bytes, and list a
 // volume directory. Page images that ai_parse_document rendered live
 // in a volume, so the browser can't fetch them directly; we proxy.
@@ -254,37 +339,6 @@ async function listVolumeDirectory(directory, token) {
   if (!resp.ok) throw new Error(`Files API HTTP ${resp.status} for ${directory}`)
   const data = await resp.json()
   return data.contents || []
-}
-
-async function writeVolumeFile(filePath, buffer, token) {
-  const resp = await fetch(
-    `${DB_HOST}/api/2.0/fs/files${filePath.split('/').map(encodeURIComponent).join('/')}?overwrite=true`,
-    {
-      method: 'PUT',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/octet-stream',
-      },
-      body: buffer,
-    },
-  )
-  if (!resp.ok) {
-    const text = await resp.text()
-    throw new Error(`Files API HTTP ${resp.status} writing ${filePath}: ${text.slice(0, 300)}`)
-  }
-}
-
-function sanitizeUploadName(name) {
-  const base = path.posix.basename(String(name || '').replace(/\\/g, '/'))
-  if (!base || base === '.' || base === '..' || base.includes('\0')) return null
-  if (!SUPPORTED_EXTENSIONS.some((ext) => base.toLowerCase().endsWith(ext))) return null
-  return base
-}
-
-function resolveUploadDirectory(directory) {
-  const uri = path.posix.normalize((directory || DOCUMENTS_PATH).toString())
-  if (!uri.startsWith('/Volumes/')) return null
-  return uri.replace(/\/+$/, '') || null
 }
 
 // ------------------------------------------------------------
@@ -377,95 +431,6 @@ async function pageSpaces({ filePath, nativeImage, pageIndex, token }) {
     console.error('PDF size probe failed:', err.message)
     // Fall back to the native space — better a slight offset than no boxes.
     return { native, custom: native }
-  }
-}
-
-function customSpaceFromPdf(pdf, pageIndex) {
-  const page = pdf.getPage(Math.min(pageIndex, Math.max(pdf.getPageCount() - 1, 0)))
-  const { width, height } = page.getSize()
-  const scale = CUSTOM_RENDER_DPI / 72
-  return { width: Math.round(width * scale), height: Math.round(height * scale) }
-}
-
-// Overlay metadata for one page: the rendered JPEG (if any), aspect ratio,
-// and the pixel spaces each parser's boxes live in.
-async function loadPageVisual({ filePath, pages, pageIndex, token, pdfDoc = null }) {
-  const pageMeta = (pages || []).find((p) => Number(p.id) === pageIndex) || pages?.[pageIndex]
-  let nativeBuffer = null
-  if (pageMeta?.image_uri) {
-    try {
-      nativeBuffer = await readVolumeFile(pageMeta.image_uri, token)
-    } catch (err) {
-      console.error('page image read failed:', err.message)
-    }
-  }
-
-  let spaces
-  if (pdfDoc) {
-    const native = nativeBuffer ? imageSize(nativeBuffer) : null
-    let custom = native
-    try {
-      custom = customSpaceFromPdf(pdfDoc, pageIndex)
-    } catch {
-      custom = native
-    }
-    spaces = { native, custom }
-  } else {
-    spaces = await pageSpaces({ filePath, nativeImage: nativeBuffer, pageIndex, token })
-  }
-
-  const isPdf = filePath.toLowerCase().endsWith('.pdf')
-  const sourceFile = `/api/document-file?path=${encodeURIComponent(filePath)}`
-  const drawnSpace = spaces.native || spaces.custom
-  const pageAspect = drawnSpace?.width > 0 && drawnSpace?.height > 0
-    ? drawnSpace.width / drawnSpace.height
-    : null
-  return {
-    spaces,
-    sourceFile,
-    pageAspect,
-    pageImage: pageMeta?.image_uri
-      ? `/api/page-image?uri=${encodeURIComponent(pageMeta.image_uri)}`
-      : (isPdf ? null : sourceFile),
-  }
-}
-
-function aggregateCustomMetrics(rows) {
-  let elements = 0
-  const types = new Set()
-  const errors = []
-  let version = null
-  let fileSize = 0
-  let path = null
-  for (const row of rows) {
-    if (!path && row.path) path = row.path
-    fileSize = Number(row.file_size || fileSize)
-    elements += Number(row.custom_elements || 0)
-    for (const t of parseArray(row.custom_types)) types.add(t)
-    if (!version) version = row.custom_version
-    errors.push(...parseArray(row.custom_errors))
-  }
-  return {
-    path,
-    fileSize,
-    elements,
-    pages: rows.length,
-    types: [...types].sort(),
-    version,
-    errors: [...new Set(errors)],
-  }
-}
-
-function sliceComparePayload(payload, pageIndex) {
-  const slice = payload.pageCache?.[pageIndex] ?? payload.pageCache?.[String(pageIndex)]
-  if (!slice) return { ...payload, pageIndex }
-  return {
-    ...payload,
-    pageIndex,
-    pageImage: slice.pageImage,
-    pageAspect: slice.pageAspect,
-    elements: slice.elements,
-    envelopes: slice.envelopes,
   }
 }
 
@@ -577,7 +542,16 @@ function normalizeElements(envelope, pageIndex, space, { keepUnboxed = false } =
 // Native page rasters for the overlay. Used when a comparison side is
 // `ai_parse_document`, and also on its own when neither dropdown is —
 // the overlay still needs the JPEGs `imageOutputPath` writes.
-async function loadNativePageImages(filePath, token) {
+async function loadNativePageImages(filePath, token, mode = DEFAULT_MODE) {
+  if (mode === 'rest') {
+    const { envelope, elapsedMs } = await executeNativeRest({ path: filePath }, token)
+    const pages = Array.isArray(envelope?.document?.pages) ? envelope.document.pages : []
+    const sql = renderRestRequest(
+      { kind: 'native', id: 'ai_parse_document' },
+      { path: filePath },
+    )
+    return { pages, sql, elapsedMs }
+  }
   const { rows, sql, elapsedMs } = await runSql(pageImagesQuery({ path: filePath }), token)
   return { pages: parseArray(rows[0]?.pages), sql, elapsedMs }
 }
@@ -648,6 +622,8 @@ app.get('/api/config', async (req, res) => {
     defaultEndpoint: DEFAULT_ENDPOINT,
     defaultLeft: DEFAULT_LEFT,
     defaultRight: DEFAULT_RIGHT,
+    defaultMode: DEFAULT_MODE,
+    modes: EXECUTION_MODES,
     parsers: PARSERS,
     imageOutputPath: IMAGE_OUTPUT_PATH,
     schema: PARSE_SCHEMA,
@@ -679,38 +655,6 @@ app.get('/api/documents', async (req, res) => {
   }
 })
 
-const UPLOAD_MAX_BYTES = 100 * 1024 * 1024
-
-// A2. Upload a PDF or image into the documents volume so it can be parsed.
-app.post('/api/documents/upload', express.raw({ type: '*/*', limit: '100mb' }), async (req, res) => {
-  const filename = sanitizeUploadName(req.query.filename)
-  if (!filename) {
-    return res.status(400).json({ error: 'filename must be a PDF, PNG, JPG, or JPEG' })
-  }
-  const directory = resolveUploadDirectory(req.query.directory)
-  if (!directory) {
-    return res.status(400).json({ error: 'directory must be a path under /Volumes' })
-  }
-  const buffer = req.body
-  if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
-    return res.status(400).json({ error: 'file contents required' })
-  }
-  if (buffer.length > UPLOAD_MAX_BYTES) {
-    return res.status(413).json({ error: 'file must be 100 MB or smaller' })
-  }
-  const token = await getToken()
-  if (!token) return res.status(503).json({ error: 'no Databricks credentials' })
-
-  const dest = `${directory}/${filename}`
-  try {
-    await writeVolumeFile(dest, buffer, token)
-    res.json({ path: dest, name: filename, size: buffer.length, directory })
-  } catch (err) {
-    console.error('upload error:', err.message)
-    res.status(500).json({ error: err.message })
-  }
-})
-
 // B. The comparison itself — the two parsers as two separate statements,
 // run one after another so each method's duration is measured on its own.
 //
@@ -731,14 +675,15 @@ app.post('/api/compare', async (req, res) => {
     path: filePath,
     left = DEFAULT_LEFT,
     right = DEFAULT_RIGHT,
+    mode: rawMode = DEFAULT_MODE,
     pageIndex = 0,
-    pageMode: pageModeRaw = 'current',
     refresh = false,
   } = req.body || {}
   if (!filePath) return res.status(400).json({ error: 'path required' })
   if (!resolveDocumentPath(filePath)) {
     return res.status(400).json({ error: 'only PDF, PNG, JPG, and JPEG files are supported' })
   }
+  const mode = rawMode === 'rest' ? 'rest' : 'dbsql'
   const leftParser = getParser(left)
   const rightParser = getParser(right)
   if (!leftParser || !rightParser) {
@@ -756,22 +701,12 @@ app.post('/api/compare', async (req, res) => {
 
   try {
     const page = Math.max(0, parseInt(pageIndex, 10) || 0)
-    const pageMode = pageModeRaw === 'all' ? 'all' : 'current'
-    const cacheKey = pageMode === 'all'
-      ? `${filePath}|${leftParser.id}|${rightParser.id}|all`
-      : `${filePath}|${leftParser.id}|${rightParser.id}|page|${page}`
+    const cacheKey = `${mode}|${filePath}|${leftParser.id}|${rightParser.id}|${page}`
     if (!refresh) {
       const cached = cacheGet(cacheKey)
       // `cached: true` lets the UI explain why a result was instant.
-      if (cached) {
-        const payload = pageMode === 'all' ? sliceComparePayload(cached, page) : cached
-        return res.json({ ...payload, cached: true })
-      }
+      if (cached) return res.json({ ...cached, cached: true })
     }
-    const discoveredPages = await countDocumentPages(filePath, token)
-    const maxPageIndex = Math.max(0, discoveredPages - 1)
-    const sqlTimeout = { timeoutMs: pageMode === 'all' ? 1_800_000 : 900_000 }
-
     // `from_json` yields SQL NULL (-> null / "null") when a side's payload
     // doesn't match the 2.0 schema at all, and a wedged endpoint can return
     // something that isn't JSON. Treat either as an empty envelope so the
@@ -791,24 +726,76 @@ app.post('/api/compare', async (req, res) => {
     // Run one statement, timing it on its own and surviving its failure.
     // `elapsedMs` here is that method's parse duration — the number the
     // UI puts head-to-head.
-    const runSide = async (side, query) => {
+    const runSqlSide = async (side, query) => {
       try {
-        const { rows, sql, elapsedMs } = await runSql(query, token, sqlTimeout)
+        const { rows, sql, elapsedMs } = await runSql(query, token)
         if (!rows.length) throw new Error('file not found by read_files')
-        return { side, row: rows[0], rows, sql, elapsedMs, error: null, skipped: false }
+        return { side, row: rows[0], sql, elapsedMs, error: null, skipped: false }
       } catch (err) {
         console.error(`${side} parse failed:`, err.message)
-        return {
-          side, row: {}, rows: [], sql: renderSql(query),
-          elapsedMs: null, error: err.message, skipped: false,
+        return { side, row: {}, sql: renderSql(query), elapsedMs: null, error: err.message, skipped: false }
+      }
+    }
+
+    // In REST mode, Model Serving endpoints take the file bytes as base64
+    // in `dataframe_records`. Pre-read the volume file once so the Files
+    // API download isn't counted inside the serving endpoint's inference
+    // latency.
+    let cachedFileBuffer = null
+    let cachedFileError = null
+    const getFileBuffer = async () => {
+      if (cachedFileBuffer) return cachedFileBuffer
+      if (cachedFileError) throw cachedFileError
+      try {
+        cachedFileBuffer = await readVolumeFile(filePath, token)
+        return cachedFileBuffer
+      } catch (err) {
+        cachedFileError = err
+        throw err
+      }
+    }
+
+    const runRestSide = async (parser) => {
+      const side = parser.id
+      const mimeType = mimeForPath(filePath)
+      let fileBuffer = null
+      try {
+        if (parser.kind === 'endpoint') {
+          fileBuffer = await getFileBuffer()
         }
+        const sql = renderRestRequest(parser, {
+          path: filePath,
+          mimeType,
+          fileSize: fileBuffer?.length || 0,
+          pageIndex: page,
+        })
+        const { envelope, elapsedMs } =
+          parser.kind === 'native'
+            ? await executeNativeRest({ path: filePath }, token)
+            : await executeEndpointRest(
+              { endpoint: parser.endpoint, path: filePath, fileBuffer, pageIndex: page },
+              token,
+            )
+        const row = envelopeToRow(parser, envelope, {
+          path: filePath,
+          fileSize: fileBuffer?.length || 0,
+        })
+        return { side, row, sql, elapsedMs, error: null, skipped: false }
+      } catch (err) {
+        console.error(`${side} REST parse failed:`, err.message)
+        const sql = renderRestRequest(parser, {
+          path: filePath,
+          mimeType,
+          fileSize: fileBuffer?.length || 0,
+          pageIndex: page,
+        })
+        return { side, row: {}, sql, elapsedMs: null, error: err.message, skipped: false }
       }
     }
 
     const skippedRun = (parser) => ({
       side: parser.id,
       row: {},
-      rows: [],
       sql: null,
       elapsedMs: null,
       error: null,
@@ -817,9 +804,8 @@ app.post('/api/compare', async (req, res) => {
 
     const runParser = (parser) => {
       if (parser.kind === 'none') return Promise.resolve(skippedRun(parser))
-      return runSide(parser.id, parseQueryFor(parser, {
-        path: filePath, pageIndex: page, pageMode, maxPageIndex,
-      }))
+      if (mode === 'rest') return runRestSide(parser)
+      return runSqlSide(parser.id, parseQueryFor(parser, { path: filePath, pageIndex: page }))
     }
 
     // Overlay rasters come from ai_parse_document's imageOutputPath, not
@@ -832,7 +818,7 @@ app.post('/api/compare', async (req, res) => {
     let pages = null
     if (needsImagePass) {
       try {
-        pages = (await loadNativePageImages(filePath, token)).pages
+        pages = (await loadNativePageImages(filePath, token, mode)).pages
       } catch (err) {
         console.error('page images failed:', err.message)
         pages = []
@@ -891,22 +877,22 @@ app.post('/api/compare', async (req, res) => {
       failure: null,
       skipped: true,
     }
-    const extract = (parser, run, row = run.row) => {
+    const extract = (parser, run) => {
       if (parser.kind === 'none' || run.skipped) {
         return { path: null, fileSize: 0, envelope: {}, metrics: emptyMetrics }
       }
       const prefix = parser.kind === 'native' ? 'native' : 'custom'
-      const src = row || {}
+      const row = run.row || {}
       return {
-        path: src.path,
-        fileSize: Number(src.file_size || 0),
-        envelope: parseEnvelope(src[`${prefix}_json`], parser.id),
+        path: row.path,
+        fileSize: Number(row.file_size || 0),
+        envelope: parseEnvelope(row[`${prefix}_json`], parser.id),
         metrics: {
-          elements: Number(src[`${prefix}_elements`] || 0),
-          pages: Number(src[`${prefix}_pages`] || 0),
-          types: parseArray(src[`${prefix}_types`]),
-          version: src[`${prefix}_version`],
-          errors: parseArray(src[`${prefix}_errors`]),
+          elements: Number(row[`${prefix}_elements`] || 0),
+          pages: Number(row[`${prefix}_pages`] || 0),
+          types: parseArray(row[`${prefix}_types`]),
+          version: row[`${prefix}_version`],
+          errors: parseArray(row[`${prefix}_errors`]),
           durationMs: run.elapsedMs,
           failure: run.error,
           skipped: false,
@@ -914,45 +900,9 @@ app.post('/api/compare', async (req, res) => {
       }
     }
 
-    const extractsByPage = (parser, run) => {
-      const map = {}
-      if (parser.kind === 'none' || run.skipped || parser.kind === 'native') return map
-      for (const row of run.rows || []) {
-        const idx = row.page_index == null ? page : Number(row.page_index)
-        map[idx] = extract(parser, run, row)
-      }
-      return map
-    }
-
     const leftExtract = extract(leftParser, leftRun)
     const rightExtract = extract(rightParser, rightRun)
-    const leftPages = extractsByPage(leftParser, leftRun)
-    const rightPages = extractsByPage(rightParser, rightRun)
     const row = { ...leftRun.row, ...rightRun.row }
-
-    const envelopeAt = (parser, wholeExtract, byPage, pageIdx) => {
-      if (parser.kind === 'none') return {}
-      if (parser.kind === 'native') return wholeExtract.envelope
-      return byPage[pageIdx]?.envelope || {}
-    }
-
-    const metricsFor = (parser, run, wholeExtract) => {
-      if (parser.kind === 'none' || run.skipped) return emptyMetrics
-      if (parser.kind === 'endpoint' && pageMode === 'all' && (run.rows || []).length) {
-        const agg = aggregateCustomMetrics(run.rows)
-        return {
-          elements: agg.elements,
-          pages: agg.pages,
-          types: agg.types,
-          version: agg.version,
-          errors: agg.errors,
-          durationMs: run.elapsedMs,
-          failure: run.error,
-          skipped: false,
-        }
-      }
-      return wholeExtract.metrics
-    }
 
     // Prefer pages from a native comparison side; otherwise keep the
     // image pass we ran up front, or fetch now if native was selected
@@ -965,13 +915,27 @@ app.post('/api/compare', async (req, res) => {
     pages = pagesFrom(leftParser, leftExtract) || pagesFrom(rightParser, rightExtract) || pages
     if (!pages) {
       try {
-        pages = (await loadNativePageImages(filePath, token)).pages
+        pages = (await loadNativePageImages(filePath, token, mode)).pages
       } catch (err) {
         console.error('page images failed:', err.message)
         pages = []
       }
     }
 
+    const pageMeta = (pages || []).find((p) => Number(p.id) === page) || pages?.[0]
+    let nativeBuffer = null
+    if (pageMeta?.image_uri) {
+      try {
+        nativeBuffer = await readVolumeFile(pageMeta.image_uri, token)
+      } catch (err) {
+        console.error('page image read failed:', err.message)
+      }
+    }
+    const spaces = await pageSpaces({
+      filePath, nativeImage: nativeBuffer, pageIndex: page, token,
+    })
+
+    const spaceFor = (parser) => (parser.kind === 'native' ? spaces.native : spaces.custom)
     const sideMeta = (parser) => ({
       id: parser.id,
       label: parser.label,
@@ -979,72 +943,26 @@ app.post('/api/compare', async (req, res) => {
       kind: parser.kind,
       endpoint: parser.endpoint || null,
     })
-
-    let pdfDoc = null
-    if (pageMode === 'all' && filePath.toLowerCase().endsWith('.pdf')) {
-      try {
-        pdfDoc = await PDFDocument.load(await readVolumeFile(filePath, token), {
-          ignoreEncryption: true,
-        })
-      } catch (err) {
-        console.error('PDF load for page spaces failed:', err.message)
-      }
-    }
-
-    const pageCount = Math.max(discoveredPages, (pages && pages.length) || 0)
-    const showPage = Math.min(page, Math.max(pageCount - 1, 0))
-
-    const buildSlice = async (pageIdx) => {
-      const visual = await loadPageVisual({
-        filePath, pages, pageIndex: pageIdx, token, pdfDoc,
-      })
-      const spaceFor = (parser) => (
-        parser.kind === 'native' ? visual.spaces.native : visual.spaces.custom
-      )
-      const leftEnv = envelopeAt(leftParser, leftExtract, leftPages, pageIdx)
-      const rightEnv = envelopeAt(rightParser, rightExtract, rightPages, pageIdx)
-      return {
-        pageImage: visual.pageImage,
-        pageAspect: visual.pageAspect,
-        sourceFile: visual.sourceFile,
-        elements: {
-          custom: leftActive
-            ? normalizeElements(leftEnv, pageIdx, spaceFor(leftParser), {
-              keepUnboxed: leftParser.kind === 'endpoint',
-            })
-            : [],
-          native: rightActive
-            ? normalizeElements(rightEnv, pageIdx, spaceFor(rightParser), {
-              keepUnboxed: rightParser.kind === 'endpoint',
-            })
-            : [],
-        },
-        envelopes: { custom: leftEnv, native: rightEnv },
-      }
-    }
-
-    let pageCache = null
-    if (pageMode === 'all' && pageCount > 1) {
-      pageCache = {}
-      for (let i = 0; i < pageCount; i++) {
-        pageCache[i] = await buildSlice(i)
-      }
-    }
-
-    const slice = pageCache?.[showPage] || await buildSlice(showPage)
-    const leftMetrics = metricsFor(leftParser, leftRun, leftExtract)
-    const rightMetrics = metricsFor(rightParser, rightRun, rightExtract)
+    const isPdf = filePath.toLowerCase().endsWith('.pdf')
+    const sourceFile = `/api/document-file?path=${encodeURIComponent(filePath)}`
+    const pageCount = (pages && pages.length) || await countDocumentPages(filePath, token)
+    const drawnSpace = spaces.native || spaces.custom
+    const pageAspect = drawnSpace?.width > 0 && drawnSpace?.height > 0
+      ? drawnSpace.width / drawnSpace.height
+      : null
 
     const payload = {
-      path: row.path || leftExtract.path || rightExtract.path || filePath,
-      pageIndex: showPage,
+      path: row.path || filePath,
+      mode,
+      pageIndex: page,
       pageCount,
-      pageMode,
-      pageImage: slice.pageImage,
+      pageImage: pageMeta?.image_uri
+        ? `/api/page-image?uri=${encodeURIComponent(pageMeta.image_uri)}`
+        : (isPdf ? null : sourceFile),
       // Source file the overlay can rasterize when native JPEGs are
       // missing (endpoint-only compare, image pass failed, etc.).
-      sourceFile: slice.sourceFile,
-      pageAspect: slice.pageAspect,
+      sourceFile,
+      pageAspect,
       // Left pane stays `custom`, right pane stays `native` — the CSS
       // and view components already key off those slot names.
       sides: { custom: sideMeta(leftParser), native: sideMeta(rightParser) },
@@ -1052,14 +970,24 @@ app.post('/api/compare', async (req, res) => {
       // measured around that method's own statement.
       metrics: {
         fileSize: leftExtract.fileSize || rightExtract.fileSize || Number(row.file_size || 0),
-        custom: leftMetrics,
-        native: rightMetrics,
+        custom: leftExtract.metrics,
+        native: rightExtract.metrics,
       },
       // Page-relative boxes + content for the overlay/markdown views.
-      elements: slice.elements,
+      elements: {
+        custom: leftActive
+          ? normalizeElements(leftExtract.envelope, page, spaceFor(leftParser), {
+            keepUnboxed: leftParser.kind === 'endpoint',
+          })
+          : [],
+        native: rightActive
+          ? normalizeElements(rightExtract.envelope, page, spaceFor(rightParser), {
+            keepUnboxed: rightParser.kind === 'endpoint',
+          })
+          : [],
+      },
       // Full envelopes for the JSON diff view.
-      envelopes: slice.envelopes,
-      ...(pageCache ? { pageCache } : {}),
+      envelopes: { custom: leftExtract.envelope, native: rightExtract.envelope },
       // Each method's statement, for the "show parsing queries" overlay.
       sqlByMethod: { custom: leftRun.sql, native: rightRun.sql },
       // `sql`/`elapsedMs` keep the shape the query overlay expects; the
@@ -1178,7 +1106,7 @@ app.post('/api/pages', async (req, res) => {
 //   2. Require a single content-addressed filename directly in the
 //      volume, which is exactly what ai_parse_document writes
 //      (`<sha256>.jpg`). No subdirectories, no traversal, no surprises.
-const PAGE_IMAGE_NAME = /^[0-9a-f]{16,128}\.(jpg|jpeg|png)$/i
+const PAGE_IMAGE_NAME = /^[0-9a-zA-Z._-]+\.(jpg|jpeg|png)$/i
 
 app.get('/api/page-image', async (req, res) => {
   const uri = path.posix.normalize((req.query.uri || '').toString())
