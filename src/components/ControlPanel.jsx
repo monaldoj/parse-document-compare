@@ -6,6 +6,7 @@
 // run — the macro metrics and the element type filter. The SQL toggle
 // is pinned to the footer.
 // ============================================================
+import { useRef } from 'react'
 import { colorForType } from './colors.js'
 
 // One metric row: the two parsers side by side, plus the delta where
@@ -32,30 +33,35 @@ function MetricRow({ label, custom, native, delta = false }) {
 
 export default function ControlPanel({
   documentsPath, setDocumentsPath, onReloadDocuments,
-  documents, loadingDocuments, selectedPath, onSelectDocument,
+  documents, loadingDocuments, uploading, onUploadFile,
+  selectedPath, onSelectDocument,
   parsers, leftParser, rightParser, setLeftParser, setRightParser,
   mode, setMode,
+  pageMode, setPageMode, pageCount,
   onParse, comparing, loadingPreview, result, error,
   presentTypes, hiddenTypes, onToggleType,
   showQueries, onToggleQueries,
 }) {
+  const fileInputRef = useRef(null)
   const metrics = result?.metrics
   const left = result?.sides?.custom
   const right = result?.sides?.native
   const leftLabel = left?.shortLabel || 'left'
   const rightLabel = right?.shortLabel || 'right'
-  const mixedPageScope = (left?.kind === 'endpoint' && right?.kind === 'native')
-    || (left?.kind === 'native' && right?.kind === 'endpoint')
+  const mixedPageScope = result?.pageMode !== 'all'
+    && ((left?.kind === 'endpoint' && right?.kind === 'native')
+      || (left?.kind === 'native' && right?.kind === 'endpoint'))
   const bothNone = leftParser === 'none' && rightParser === 'none'
   const dropdownSingle = leftParser === 'none' || rightParser === 'none'
   const resultSingle = left?.kind === 'none' || right?.kind === 'none'
   const modeChanged = Boolean(result && (result.mode || 'dbsql') !== mode)
   const parsersChanged = Boolean(result && (left?.id !== leftParser || right?.id !== rightParser))
-  const enginesDirty = modeChanged || parsersChanged
+  const scopeChanged = Boolean(result && (result.pageMode || 'current') !== pageMode)
+  const enginesDirty = modeChanged || parsersChanged || scopeChanged
   // An endpoint parses ONE page per call while ai_parse_document parses
   // the whole document, so envelope-wide totals aren't comparable on a
-  // multi-page PDF. The per-page counts are — both sides are already
-  // filtered to the page on screen.
+  // multi-page PDF unless `pageMode === 'all'`. The per-page counts are —
+  // both sides are already filtered to the page on screen.
   const perPage = result
     ? {
         custom: left?.kind === 'none' ? null : result.elements.custom.length,
@@ -65,10 +71,10 @@ export default function ControlPanel({
 
   const runLabel = comparing
     ? 'Parsing…'
-    : modeChanged && !parsersChanged
+    : modeChanged && !parsersChanged && !scopeChanged
       ? `Re-run with ${mode === 'rest' ? 'REST API' : 'DBSQL'}`
       : enginesDirty
-        ? 'Re-run to apply parser changes'
+        ? 'Re-run to apply changes'
         : result
           ? (dropdownSingle ? 'Re-run parse' : 'Re-run comparison')
           : (dropdownSingle ? 'Run parse' : 'Run comparison')
@@ -148,6 +154,44 @@ export default function ControlPanel({
               ))}
             </select>
           </label>
+
+          <div className="field">
+            <span className="field-label">Pages to parse</span>
+            <div className="scope-toggle" role="group" aria-label="Pages to parse">
+              <button
+                type="button"
+                className={pageMode === 'current' ? 'active' : ''}
+                onClick={() => setPageMode('current')}
+                disabled={comparing}
+              >
+                First page
+              </button>
+              <button
+                type="button"
+                className={pageMode === 'all' ? 'active' : ''}
+                onClick={() => setPageMode('all')}
+                disabled={comparing}
+              >
+                All pages{selectedPath && pageCount > 1 ? ` (${pageCount})` : ''}
+              </button>
+            </div>
+            {pageMode === 'all' && (
+              <p className="field-hint">
+                {mode === 'rest' ? (
+                  <>
+                    In REST API mode, custom endpoints fan out parallel{' '}
+                    <code>/serving-endpoints/&lt;name&gt;/invocations</code>{' '}
+                    calls across every page (<code>0..N</code>).
+                  </>
+                ) : (
+                  <>
+                    In DBSQL mode, custom endpoints fan out across every page in
+                    parallel via <code>explode(sequence(0, N))</code>.
+                  </>
+                )}
+              </p>
+            )}
+          </div>
         </form>
 
         {bothNone && (
@@ -168,6 +212,25 @@ export default function ControlPanel({
               {loadingDocuments ? '…' : `${documents.length}`}
             </span>
           </h2>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg"
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const file = e.target.files?.[0]
+              e.target.value = ''
+              if (file) onUploadFile(file)
+            }}
+          />
+          <button
+            type="button"
+            className="upload-btn"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading || comparing || !documentsPath}
+          >
+            {uploading ? 'Uploading to volume…' : 'Upload PDF or image'}
+          </button>
           {loadingDocuments ? (
             <p className="muted">Listing volume…</p>
           ) : !documents.length ? (

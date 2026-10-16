@@ -73,8 +73,9 @@ export default function TimingBar({ result }) {
   const bothRan = c != null && n != null && !sameEngine && !leftSkipped && !rightSkipped
   const ratio = bothRan && Math.min(c, n) > 0 ? Math.max(c, n) / Math.min(c, n) : null
   const rightFaster = bothRan && n < c
-  const mixedPageScope = (left?.kind === 'endpoint' && right?.kind === 'native')
-    || (left?.kind === 'native' && right?.kind === 'endpoint')
+  const mixedPageScope = result.pageMode !== 'all'
+    && ((left?.kind === 'endpoint' && right?.kind === 'native')
+      || (left?.kind === 'native' && right?.kind === 'endpoint'))
   const wholeDocPages = Math.max(custom.pages || 0, native.pages || 0)
 
   return (
@@ -135,12 +136,22 @@ export default function TimingBar({ result }) {
             .{' '}
           </>
         )}
-        {mixedPageScope && wholeDocPages > 1 && (
+        {result.pageMode === 'all' && wholeDocPages > 1 ? (
+          result.mode === 'rest' ? (
+            <>
+              Custom endpoints fanned out across all {wholeDocPages} pages in parallel via REST API calls.{' '}
+            </>
+          ) : (
+            <>
+              Custom endpoints fanned out across all {wholeDocPages} pages in parallel inside one SQL query.{' '}
+            </>
+          )
+        ) : mixedPageScope && wholeDocPages > 1 ? (
           <>
             The serving endpoint parsed 1 page; <code>ai_parse_document</code> parsed
             all {wholeDocPages}.{' '}
           </>
-        )}
+        ) : null}
         A cold scale-to-zero endpoint includes start-up time.
       </p>
 

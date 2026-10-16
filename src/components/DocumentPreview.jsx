@@ -2,7 +2,7 @@
 // directly; PDFs use the browser's viewer, scrolled to the page the
 // comparison will target once the analyst clicks Run comparison.
 
-export default function DocumentPreview({ preview, pageIndex, loading }) {
+export default function DocumentPreview({ preview, pageIndex, pageMode = 'current', loading }) {
   if (loading) {
     return (
       <div className="overlay-notice">
@@ -33,7 +33,9 @@ export default function DocumentPreview({ preview, pageIndex, loading }) {
         <h3>{name}</h3>
         <span className="muted">
           Preview only — click Run comparison to parse
-          {preview.pageCount > 1 ? ` page ${pageIndex + 1}` : ' this file'}
+          {preview.pageCount > 1
+            ? (pageMode === 'all' ? ` all ${preview.pageCount} pages` : ' page 1')
+            : ' this file'}
         </span>
       </header>
       {isPdf ? (

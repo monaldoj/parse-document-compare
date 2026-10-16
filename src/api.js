@@ -53,15 +53,32 @@ export const api = {
   // A. Parseable documents in a Unity Catalog volume directory.
   documents: (path) => get(`/api/documents?path=${encodeURIComponent(path)}`),
 
+  // A2. Upload a PDF or image into the volume directory.
+  upload: async (directory, file) => {
+    const qs = new URLSearchParams({
+      directory: directory || '',
+      filename: file.name,
+    })
+    const resp = await fetch(`/api/documents/upload?${qs.toString()}`, {
+      method: 'POST',
+      headers: { 'Content-Type': file.type || 'application/octet-stream' },
+      body: file,
+    })
+    const data = await resp.json()
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`)
+    return data
+  },
+
   // Preview a document (page count + file URL) without running either parser.
   preview: (path) => post('/api/preview', { path }),
 
-  // B. The comparison — both parsers on one page of one document.
+  // B. The comparison — both parsers on one page (or all pages) of one document.
   // `mode` chooses between `'dbsql'` (SQL Warehouse) and `'rest'` (real-time REST API).
+  // `pageMode` chooses between `'current'` (single page) and `'all'` (full document).
   // `refresh` forces a re-parse instead of reusing the server's cached
   // result (a parse costs minutes, so results are memoized by default).
-  compare: ({ path, left, right, mode, pageIndex, refresh }) =>
-    post('/api/compare', { path, left, right, mode, pageIndex, refresh }),
+  compare: ({ path, left, right, mode, pageIndex, pageMode, refresh }) =>
+    post('/api/compare', { path, left, right, mode, pageIndex, pageMode, refresh }),
 
   // C. Page count + rendered page images, without re-running the
   // custom endpoint (used when paging through a PDF).

@@ -145,15 +145,8 @@ vs 4.63%/1.22% (native) — sub-0.2% agreement.
   `response` column holding an `ai_parse_document` 2.0 JSON envelope.
 
 The default comparison is native `ai_parse_document` vs the
-`ai-parse-document-gemini` serving endpoint (Gemini 3.8 Flash under the
-hood). Other dropdown options include Florence-2, PaliGemma, and
-Gemini 3.5 Flash. The Florence-2 endpoint is built by the
-**Florence-2 → `ai_parse_document` 2.0** notebook: Florence-2 runs
-`<OCR_WITH_REGION>` + `<DENSE_REGION_CAPTION>` on each page, DSPy
-calls `databricks-claude-sonnet-5` with a typed Pydantic signature to
-group and classify the spans, and a deterministic finalization pass
-validates the envelope. Any endpoint honoring that contract can be
-swapped in from the sidebar.
+`ai-parse-document-fmapi` serving endpoint. Any endpoint honoring that
+contract can be configured via `FMAPI_ENDPOINT_NAME`.
 
 > **Cost note.** One comparison runs a vision model plus an LLM reformat
 > pass, and a scale-to-zero endpoint may cold-start — expect anywhere
@@ -172,10 +165,7 @@ swapped in from the sidebar.
 | `SQL_WAREHOUSE_HTTP_PATH` | yes\* | Alternative to the above — `/sql/1.0/warehouses/<id>`; the id is parsed from the tail. |
 | `DOCUMENTS_PATH` | no | Volume folder to browse. Default `/Volumes/justinm_demo/bio_track/unstructured`. |
 | `IMAGE_OUTPUT_PATH` | no | Volume `ai_parse_document` renders page images into. Default `/Volumes/justinm_demo/parse/page_images`. **Must exist.** |
-| `CUSTOM_ENDPOINT_NAME` | no | Florence serving endpoint (one dropdown option). Default `florence-2-large-ft-ai-parse-document`. |
-| `PALIGEMMA_ENDPOINT_NAME` | no | PaliGemma serving endpoint. Default `paligemma2-3b-ai-parse-document`. |
-| `GEMINI_ENDPOINT_NAME` | no | Gemini 3.5 Flash serving endpoint. Default `gemini-3-5-flash-ai-parse-document`. |
-| `GEMINI_38_ENDPOINT_NAME` | no | Gemini 3.8 Flash serving endpoint — the default left parser. Default `ai-parse-document-gemini`. |
+| `FMAPI_ENDPOINT_NAME` | no | Model Serving endpoint for document parsing — the default left parser. Default `ai-parse-document-fmapi`. |
 | `CUSTOM_RENDER_DPI` | no | DPI the custom endpoint rasterizes PDFs at. Default `200`. |
 | `COMPARE_CACHE_TTL_MS` | no | Comparison cache lifetime. Default 6 h. |
 
@@ -220,7 +210,7 @@ export DATABRICKS_TOKEN="dapi..."                     # your PAT
 export WAREHOUSE_ID="<your-warehouse-id>"
 export DOCUMENTS_PATH="/Volumes/catalog/schema/volume"
 export IMAGE_OUTPUT_PATH="/Volumes/catalog/schema/page_images"
-export CUSTOM_ENDPOINT_NAME="my-parse-document-endpoint"
+export FMAPI_ENDPOINT_NAME="ai-parse-document-fmapi"
 
 # Option 1 — production-style: build the SPA, serve everything from Express
 npm run build
@@ -260,7 +250,7 @@ vars only deploy from `app.yaml` and resource bindings — *not* from a
 bundle `config.env` block — so the id has to travel through the binding.)
 
 **Set the volume paths and endpoint before deploying.** `DOCUMENTS_PATH`,
-`IMAGE_OUTPUT_PATH`, the serving-endpoint names, and `CUSTOM_RENDER_DPI`
+`IMAGE_OUTPUT_PATH`, `FMAPI_ENDPOINT_NAME`, and `CUSTOM_RENDER_DPI`
 have no resource to bind to and `app.yaml` cannot use `${var.*}`
 interpolation, so they are **hardcoded in `app.yaml`** — edit them there.
 
