@@ -21,6 +21,7 @@ import {
   makeNativeRestPayload,
   makeEndpointPayload,
   renderRestRequest,
+  resolveConfigValue,
 } from './queries.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -33,13 +34,15 @@ const PORT = process.env.PORT || 8000
 const rawHost = process.env.DATABRICKS_HOST || ''
 const DB_HOST = rawHost.startsWith('http') ? rawHost : rawHost ? `https://${rawHost}` : ''
 
-// Warehouse that runs the parsing SQL. Prefer WAREHOUSE_ID; otherwise
-// derive it from a classic SQL_WAREHOUSE_HTTP_PATH like
-// /sql/1.0/warehouses/<id> so either env var works. Required per-workspace.
-const WAREHOUSE_ID =
-  process.env.WAREHOUSE_ID ||
+// Warehouse that runs the parsing SQL. Prefer WAREHOUSE_ID (or
+// SQL_WAREHOUSE_HTTP_PATH); otherwise fall back to `warehouse_id` from
+// `databricks.yml` (unless it is still the `<sql warehouse_id>` template
+// placeholder).
+const rawWarehouseId =
+  resolveConfigValue(['WAREHOUSE_ID'], ['warehouse_id'], '') ||
   (process.env.SQL_WAREHOUSE_HTTP_PATH || '').split('/').pop() ||
   ''
+const WAREHOUSE_ID = rawWarehouseId.startsWith('<') ? '' : rawWarehouseId
 
 // Documents the browser will list. Only these extensions are parseable.
 const SUPPORTED_EXTENSIONS = ['.pdf', '.png', '.jpg', '.jpeg']
@@ -1458,29 +1461,30 @@ app.post('/api/pages', async (req, res) => {
 //
 // This endpoint reads with the APP's credentials, so the path has to be
 // constrained or it becomes a read-any-file proxy. Two gates:
-//   1. Normalize away `.`/`..` segments FIRST, then require the result to
-//      sit under the configured image volume. A bare `startsWith` check
-//      is not enough — `<volume>/../../other/secret.png` starts with the
-//      volume prefix but escapes it.
-//   2. Require a single content-addressed filename directly in the
-//      volume, which is exactly what ai_parse_document writes
+//   1. Normalize away `.`/`..` segments FIRST, then require the directory
+//      to sit under `/Volumes/<catalog>/<schema>/<volume>[/...]/page_images`
+//      so it works for any `documents_path` (including paths entered in
+//      the UI) while never escaping `/page_images`.
+//   2. Require a single content-addressed filename directly inside
+//      `page_images`, which is what ai_parse_document writes
 //      (`<sha256>.jpg`). No subdirectories, no traversal, no surprises.
+const PAGE_IMAGE_DIR = /^\/Volumes\/[^/]+\/[^/]+\/[^/]+(?:\/[^/]+)*\/page_images$/
 const PAGE_IMAGE_NAME = /^[0-9a-zA-Z._-]+\.(jpg|jpeg|png)$/i
 
 app.get('/api/page-image', async (req, res) => {
   const uri = path.posix.normalize((req.query.uri || '').toString())
-  const root = IMAGE_OUTPUT_PATH.replace(/\/+$/, '')
-  const name = uri.startsWith(`${root}/`) ? uri.slice(root.length + 1) : null
-  if (!name || !PAGE_IMAGE_NAME.test(name)) {
+  const dir = path.posix.dirname(uri)
+  const name = path.posix.basename(uri)
+  if (!PAGE_IMAGE_DIR.test(dir) || !PAGE_IMAGE_NAME.test(name)) {
     return res.status(400).json({
-      error: 'uri must be a rendered page image directly under the image output path',
+      error: 'uri must be a rendered page image inside a /Volumes/.../page_images directory',
     })
   }
   const token = await getToken()
   if (!token) return res.status(503).json({ error: 'no Databricks credentials' })
 
   try {
-    const buffer = await readVolumeFile(`${root}/${name}`, token)
+    const buffer = await readVolumeFile(`${dir}/${name}`, token)
     res.set('Content-Type', uri.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg')
     // Page images are content-addressed (sha filenames), so cache hard.
     res.set('Cache-Control', 'private, max-age=86400, immutable')

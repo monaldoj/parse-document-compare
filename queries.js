@@ -17,36 +17,163 @@
 // a databricks-sql cursor in a Python port without touching the SQL.
 // ============================================================
 
-// Unity Catalog volume that ai_parse_document renders its page images
-// into (`imageOutputPath`). This is what makes the bounding boxes
-// pixel-exact: the native parser reports coordinates relative to the
-// image it rendered, and that image is what the UI draws on. Supplied
-// per-workspace so the app deploys anywhere without code changes.
-export const IMAGE_OUTPUT_PATH =
-  process.env.IMAGE_OUTPUT_PATH || '/Volumes/justinm_demo/parse/page_images'
+import { readFileSync, existsSync } from 'fs'
+import path from 'path'
+import { fileURLToPath } from 'url'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
+function stripYamlScalar(raw) {
+  const trimmed = raw.trim()
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1)
+  }
+  return trimmed.replace(/\s+#.*$/, '').trim()
+}
+
+// Read the `variables:` defaults from `databricks.yml` so `databricks.yml`
+// is the single source of truth for defaults locally and in Databricks Apps
+// (even when the Apps runtime passes uninterpolated `${var.*}` strings from
+// `app.yaml`).
+function loadBundleVariables() {
+  const vars = {}
+  const candidates = [
+    path.join(__dirname, 'databricks.yml'),
+    path.join(__dirname, 'databricks.yaml'),
+  ]
+  const bundlePath = candidates.find((p) => existsSync(p))
+  if (!bundlePath) return vars
+
+  try {
+    const content = readFileSync(bundlePath, 'utf-8')
+    const lines = content.split(/\r?\n/)
+    let inVariables = false
+    let currentVar = null
+    for (const line of lines) {
+      if (/^\s*#/.test(line) || !line.trim()) continue
+      if (/^[A-Za-z0-9_-]+\s*:/.test(line)) {
+        inVariables = /^variables\s*:/.test(line)
+        currentVar = null
+        continue
+      }
+      if (!inVariables) continue
+      const varMatch = line.match(/^  ([A-Za-z0-9_-]+)\s*:\s*(.*)$/)
+      if (varMatch) {
+        currentVar = varMatch[1]
+        const inlineVal = varMatch[2].trim()
+        if (inlineVal && !inlineVal.startsWith('#')) {
+          vars[currentVar] = stripYamlScalar(inlineVal)
+        }
+        continue
+      }
+      if (currentVar) {
+        const defMatch = line.match(/^    default\s*:\s*(.+)$/)
+        if (defMatch) {
+          vars[currentVar] = stripYamlScalar(defMatch[1])
+        }
+      }
+    }
+  } catch {
+    // Fall back to built-in defaults if databricks.yml cannot be read.
+  }
+  return vars
+}
+
+const BUNDLE_VARS = loadBundleVariables()
+
+function isUnresolvedVarRef(val) {
+  return typeof val === 'string' && /^\$\{var\.[^}]+\}$/.test(val.trim())
+}
+
+export function resolveConfigValue(envNames, bundleVarNames, fallback) {
+  // 1. Explicit environment variable (if set and not an uninterpolated `${var.*}` reference)
+  for (const name of envNames) {
+    const val = process.env[name]
+    if (val && !isUnresolvedVarRef(val)) return val.trim()
+  }
+  // 2. BUNDLE_VAR_<var> environment variable
+  for (const varName of bundleVarNames) {
+    const val = process.env[`BUNDLE_VAR_${varName}`]
+    if (val && !isUnresolvedVarRef(val)) return val.trim()
+  }
+  // 3. If an env var holds `${var.<name>}`, resolve `<name>` from databricks.yml
+  for (const name of envNames) {
+    const val = process.env[name]
+    const match = typeof val === 'string' && val.trim().match(/^\$\{var\.([^}]+)\}$/)
+    if (match && BUNDLE_VARS[match[1]]) {
+      return BUNDLE_VARS[match[1]]
+    }
+  }
+  // 4. `variables.<name>.default` from databricks.yml
+  for (const varName of bundleVarNames) {
+    if (BUNDLE_VARS[varName]) return BUNDLE_VARS[varName]
+  }
+  return fallback
+}
 
 // Volume directory the file browser lists documents from.
-export const DOCUMENTS_PATH =
-  process.env.DOCUMENTS_PATH || '/Volumes/justinm_demo/bio_track/unstructured'
+export const DOCUMENTS_PATH = resolveConfigValue(
+  ['DOCUMENTS_PATH'],
+  ['documents_path'],
+  '/Volumes/<catalog>/<schema>/docs',
+)
 
-// Foundation Model API serving endpoint (ai-parse-document-fmapi).
-export const FMAPI_ENDPOINT =
-  process.env.FMAPI_ENDPOINT_NAME || 'ai-parse-document-fmapi'
+const DOC_EXTENSIONS = ['.pdf', '.png', '.jpg', '.jpeg']
+
+// Derive the page-images directory (`<documents_path>/page_images`) from
+// either a volume directory path or a document file path inside it. Even
+// when the user enters a different volume directory in the UI, rendered
+// page images are written to `<that_directory>/page_images` in the same
+// volume without needing a separate image_output_path setting.
+export function imageOutputPathFor(pathOrDir = DOCUMENTS_PATH) {
+  const raw = String(pathOrDir || DOCUMENTS_PATH).trim().replace(/\/+$/, '')
+  const lower = raw.toLowerCase()
+  const isFile = DOC_EXTENSIONS.some((ext) => lower.endsWith(ext))
+  const baseDir = isFile ? path.posix.dirname(raw) : raw
+  return baseDir.endsWith('/page_images') ? baseDir : `${baseDir}/page_images`
+}
+
+export const IMAGE_OUTPUT_PATH = imageOutputPathFor(DOCUMENTS_PATH)
+
+// Comma-separated list of custom Model Serving endpoints configured in
+// `databricks.yml` (`custom_endpoint_names` / `custom_endpoint_name`).
+export const CUSTOM_ENDPOINT_NAMES_RAW = resolveConfigValue(
+  ['CUSTOM_ENDPOINT_NAMES', 'CUSTOM_ENDPOINT_NAME', 'FMAPI_ENDPOINT_NAME'],
+  ['custom_endpoint_names', 'custom_endpoint_name'],
+  'ai-parse-document-fmapi',
+)
+
+const parsedEndpoints = [
+  ...new Set(
+    CUSTOM_ENDPOINT_NAMES_RAW.split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  ),
+]
+
+export const CUSTOM_ENDPOINTS = parsedEndpoints.length
+  ? parsedEndpoints
+  : ['ai-parse-document-fmapi']
 
 // Kept so existing env / startup logs still have a single default.
-export const DEFAULT_ENDPOINT = FMAPI_ENDPOINT
+export const DEFAULT_ENDPOINT = CUSTOM_ENDPOINTS[0]
 
-// The two dropdowns choose from this catalog. `kind: 'endpoint'` runs
-// customParseQuery; `kind: 'native'` runs nativeParseQuery; `kind: 'none'`
-// skips that side so a single parser can run on its own.
+// The two dropdowns choose from this catalog: every custom serving
+// endpoint from `custom_endpoint_names`, plus `ai_parse_document` and
+// `No model`. `kind: 'endpoint'` runs customParseQuery; `kind: 'native'`
+// runs nativeParseQuery; `kind: 'none'` skips that side so a single
+// parser can run on its own.
 export const PARSERS = [
-  {
-    id: 'ai-parse-document-fmapi',
-    label: FMAPI_ENDPOINT,
-    shortLabel: FMAPI_ENDPOINT,
+  ...CUSTOM_ENDPOINTS.map((endpoint) => ({
+    id: endpoint,
+    label: endpoint,
+    shortLabel: endpoint,
     kind: 'endpoint',
-    endpoint: FMAPI_ENDPOINT,
-  },
+    endpoint,
+  })),
   {
     id: 'ai_parse_document',
     label: 'ai_parse_document',
@@ -61,7 +188,7 @@ export const PARSERS = [
   },
 ]
 
-export const DEFAULT_LEFT = 'ai-parse-document-fmapi'
+export const DEFAULT_LEFT = CUSTOM_ENDPOINTS[0]
 export const DEFAULT_RIGHT = 'ai_parse_document'
 
 // Execution modes: DBSQL (runs ai_parse_document / ai_query on the SQL
@@ -326,7 +453,7 @@ export function nativeParseQuery({ path }) {
     statement,
     parameters: [
       param('path', path),
-      param('imageOut', IMAGE_OUTPUT_PATH),
+      param('imageOut', imageOutputPathFor(path)),
       param('schema', PARSE_SCHEMA),
     ],
   }
@@ -364,7 +491,7 @@ export function pageImagesQuery({ path }) {
     statement,
     parameters: [
       param('path', path),
-      param('imageOut', IMAGE_OUTPUT_PATH),
+      param('imageOut', imageOutputPathFor(path)),
       param('schema', PARSE_SCHEMA),
     ],
   }
@@ -398,7 +525,7 @@ export function makeNativeRestPayload({ path }) {
     content: path,
     options: {
       version: '2.0',
-      image_output_path: IMAGE_OUTPUT_PATH,
+      image_output_path: imageOutputPathFor(path),
     },
   }
 }

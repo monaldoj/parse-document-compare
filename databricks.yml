@@ -1,22 +1,15 @@
 # Databricks Asset Bundle for the Parser Compare app.
 #
-#   databricks bundle deploy -t dev --var="warehouse_id=<id>"
+#   databricks bundle deploy -t dev
 #
 # `lifecycle.started: true` on the app resource makes deploy also
 # push source and start (or restart) the app — no separate
 # `databricks bundle run` is required.
 #
-# This bundle is workspace-agnostic: everything specific to a workspace
-# (host, warehouse, Unity Catalog locations) is supplied through the
-# variables below, either on the command line (--var=...), via
-# BUNDLE_VAR_<name> environment variables, or per-target overrides.
-#
-# The warehouse id flows from the `warehouse_id` variable into the
-# `sql-warehouse` resource binding below; app.yaml then reads it at
-# runtime via `valueFrom: sql-warehouse`. (App env vars do NOT deploy
-# from a bundle `config.env` block — only resource bindings do — so the
-# binding is the channel. Volume paths and the endpoint name are set in
-# app.yaml.)
+# All workspace-specific settings (warehouse, Unity Catalog volume path,
+# and custom Model Serving endpoints) live in the `variables:` section
+# below and can be edited here, overridden per target, or passed on the
+# command line (--var="...").
 bundle:
   name: parse-document-compare
 
@@ -26,6 +19,13 @@ bundle:
 variables:
   warehouse_id:
     description: SQL warehouse that runs ai_parse_document and ai_query.
+    default: "<sql warehouse_id>"
+  documents_path:
+    description: Unity Catalog volume folder holding the PDFs and images to parse (rendered page images are written to a /page_images subdirectory here).
+    default: "/Volumes/<catalog>/<schema>/docs"
+  custom_endpoint_names:
+    description: Comma-separated list of Model Serving endpoints to populate the parser dropdowns.
+    default: "ai-parse-document-fmapi"
 
 # Files synced to the workspace alongside this bundle. node_modules is
 # rebuilt by the Apps runtime and is never needed in the deployed app.
@@ -47,7 +47,7 @@ resources:
   apps:
     parse-document-compare:
       name: parse-document-compare
-      description: "Side-by-side comparison of ai_parse_document and a Model Serving document parser"
+      description: "Side-by-side comparison of ai_parse_document and Model Serving document parsers"
       # Deploy from the bundle's synced source folder.
       source_code_path: ./
       # Start (or restart) the app as part of `bundle deploy` so a
@@ -55,11 +55,22 @@ resources:
       # deployment engine (the CLI default).
       lifecycle:
         started: true
+      config:
+        command:
+          - npm
+          - run
+          - start:built
+        env:
+          - name: WAREHOUSE_ID
+            value_from: sql-warehouse
+          - name: DOCUMENTS_PATH
+            value: ${var.documents_path}
+          - name: CUSTOM_ENDPOINT_NAMES
+            value: ${var.custom_endpoint_names}
+          - name: CUSTOM_RENDER_DPI
+            value: "200"
       # Bind the SQL warehouse so app.yaml can read its id at runtime via
-      # `valueFrom: sql-warehouse`. The id is supplied per-workspace by
-      # the `warehouse_id` bundle variable. (command + env live in
-      # app.yaml, which is the source of truth for the app's config — a
-      # bundle `config.env` block does NOT deploy env to the running app.)
+      # `valueFrom: sql-warehouse`.
       resources:
         - name: sql-warehouse
           sql_warehouse:

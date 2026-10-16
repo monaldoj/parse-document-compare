@@ -132,21 +132,21 @@ vs 4.63%/1.22% (native) — sub-0.2% agreement.
 
 ## Data & prerequisites
 
-* **Documents** — any PDF / PNG / JPG / JPEG in a Unity Catalog volume
-  (`DOCUMENTS_PATH`).
-* **A page-image volume** (`IMAGE_OUTPUT_PATH`) — must already exist;
-  `ai_parse_document` writes rendered pages here. Create it once:
-  ```sql
-  CREATE VOLUME IF NOT EXISTS justinm_demo.parse.page_images;
-  ```
+* **Documents volume** (`DOCUMENTS_PATH`) — any Unity Catalog volume
+  folder holding PDF / PNG / JPG / JPEG files. `ai_parse_document`
+  automatically writes its rendered page images to a `/page_images`
+  subdirectory inside this same volume (`<documents_path>/page_images`),
+  even when you switch to a different volume directory in the UI.
 * **A serving endpoint** whose signature matches the reference notebook:
   it takes `file_b64`, `mime_type`, `file_path`, `file_name`,
   `file_size`, `page_limit`, `page_index`, `reformat` and returns a
   `response` column holding an `ai_parse_document` 2.0 JSON envelope.
 
 The default comparison is native `ai_parse_document` vs the
-`ai-parse-document-fmapi` serving endpoint. Any endpoint honoring that
-contract can be configured via `FMAPI_ENDPOINT_NAME`.
+`ai-parse-document-fmapi` serving endpoint. Additional custom endpoints
+honoring that contract can be configured as a comma-separated list via
+`custom_endpoint_names` in `databricks.yml` (or `CUSTOM_ENDPOINT_NAMES`
+in the environment).
 
 > **Cost note.** One comparison runs a vision model plus an LLM reformat
 > pass, and a scale-to-zero endpoint may cold-start — expect anywhere
@@ -155,24 +155,19 @@ contract can be configured via `FMAPI_ENDPOINT_NAME`.
 
 ---
 
-## Environment variables
+## Bundle & Environment variables
 
-| Variable | Required | Purpose |
-|---|---|---|
-| `DATABRICKS_HOST` | yes\*\* | Workspace URL. Injected automatically in a deployed Databricks App. |
-| `DATABRICKS_TOKEN` | local only | PAT for local dev. In a deployed App auth is automatic (M2M OAuth) and this is **not** set. |
-| `WAREHOUSE_ID` | yes\* | SQL warehouse id, e.g. `abc123def456`. |
-| `SQL_WAREHOUSE_HTTP_PATH` | yes\* | Alternative to the above — `/sql/1.0/warehouses/<id>`; the id is parsed from the tail. |
-| `DOCUMENTS_PATH` | no | Volume folder to browse. Default `/Volumes/justinm_demo/bio_track/unstructured`. |
-| `IMAGE_OUTPUT_PATH` | no | Volume `ai_parse_document` renders page images into. Default `/Volumes/justinm_demo/parse/page_images`. **Must exist.** |
-| `FMAPI_ENDPOINT_NAME` | no | Model Serving endpoint for document parsing — the default left parser. Default `ai-parse-document-fmapi`. |
-| `CUSTOM_RENDER_DPI` | no | DPI the custom endpoint rasterizes PDFs at. Default `200`. |
-| `COMPARE_CACHE_TTL_MS` | no | Comparison cache lifetime. Default 6 h. |
+Defaults live in `databricks.yml` under `variables:` and flow into `app.yaml` / `queries.js`:
 
-\* Provide **either** `WAREHOUSE_ID` **or** `SQL_WAREHOUSE_HTTP_PATH`.
-
-\*\* Required locally or when deploying outside the bundle. The Apps
-runtime injects `DATABRICKS_HOST` and the OAuth credentials automatically.
+| Bundle variable (`databricks.yml`) | Env variable (`app.yaml`) | Default | Purpose |
+|---|---|---|---|
+| — | `DATABRICKS_HOST` | *(injected in Apps)* | Workspace URL. Required locally. |
+| — | `DATABRICKS_TOKEN` | *(local only)* | PAT for local dev. Deployed Apps use automatic M2M OAuth. |
+| `warehouse_id` | `WAREHOUSE_ID` | `<sql warehouse_id>` | SQL warehouse id that runs `ai_parse_document` and `ai_query`. |
+| `documents_path` | `DOCUMENTS_PATH` | `/Volumes/<catalog>/<schema>/docs` | Volume folder holding PDFs and images to parse. Rendered page images are written to `<documents_path>/page_images`. |
+| `custom_endpoint_names` | `CUSTOM_ENDPOINT_NAMES` | `ai-parse-document-fmapi` | Comma-separated list of Model Serving endpoints populating the parser dropdowns (alongside `ai_parse_document` and `No model`). |
+| — | `CUSTOM_RENDER_DPI` | `200` | DPI the custom endpoints rasterize PDFs at. |
+| — | `COMPARE_CACHE_TTL_MS` | `21600000` (6 h) | Comparison cache lifetime. |
 
 ---
 
@@ -208,9 +203,8 @@ npm install
 export DATABRICKS_HOST="https://my-workspace.cloud.databricks.com"
 export DATABRICKS_TOKEN="dapi..."                     # your PAT
 export WAREHOUSE_ID="<your-warehouse-id>"
-export DOCUMENTS_PATH="/Volumes/catalog/schema/volume"
-export IMAGE_OUTPUT_PATH="/Volumes/catalog/schema/page_images"
-export FMAPI_ENDPOINT_NAME="ai-parse-document-fmapi"
+export DOCUMENTS_PATH="/Volumes/catalog/schema/docs"
+export CUSTOM_ENDPOINT_NAMES="ai-parse-document-fmapi"
 
 # Option 1 — production-style: build the SPA, serve everything from Express
 npm run build
@@ -230,38 +224,73 @@ npm run dev               # frontend on :5173, proxies /api -> :8000
 
 ## Deploy as a Databricks App (Asset Bundle)
 
-The repo ships a workspace-agnostic bundle (`databricks.yml`) — the
-warehouse id is passed in at deploy time.
+The repo ships a workspace-agnostic Databricks Asset Bundle (`databricks.yml`).
+All workspace-specific configuration lives under `variables:` in `databricks.yml`:
 
-```bash
-export DATABRICKS_HOST="https://my-workspace.cloud.databricks.com"
-export DATABRICKS_TOKEN="dapi..."
+* `warehouse_id` — SQL warehouse ID (default: `"<sql warehouse_id>"`)
+* `documents_path` — Unity Catalog volume folder with PDFs/images to parse (default: `"/Volumes/<catalog>/<schema>/docs"`). Rendered page images from `ai_parse_document` are automatically written to `<documents_path>/page_images` in the same volume.
+* `custom_endpoint_names` — Comma-separated list of Model Serving endpoint names for the parser dropdowns (default: `"ai-parse-document-fmapi"`)
 
-# Deploy and start the app, passing your warehouse id.
-# `lifecycle.started: true` in databricks.yml makes deploy also push
-# source and start (or restart) the app — no separate bundle run.
-databricks bundle deploy -t dev --var="warehouse_id=<your-warehouse-id>"
-```
+Because `lifecycle.started: true` is set on the app resource in `databricks.yml`, deploying the bundle automatically pushes the source code and starts (or restarts) the app — no separate `bundle run` step is required.
 
-`warehouse_id` binds the SQL warehouse as a `CAN_USE` resource named
-`sql-warehouse`; `app.yaml` reads its id at runtime via
-`valueFrom: sql-warehouse` and exposes it as `WAREHOUSE_ID`. (App env
-vars only deploy from `app.yaml` and resource bindings — *not* from a
-bundle `config.env` block — so the id has to travel through the binding.)
+---
 
-**Set the volume paths and endpoint before deploying.** `DOCUMENTS_PATH`,
-`IMAGE_OUTPUT_PATH`, `FMAPI_ENDPOINT_NAME`, and `CUSTOM_RENDER_DPI`
-have no resource to bind to and `app.yaml` cannot use `${var.*}`
-interpolation, so they are **hardcoded in `app.yaml`** — edit them there.
+### Option 1: Deploy from a local machine (Databricks CLI)
 
-Targets are `dev` (default) and `prod` (`-t prod` deploys under
-`/Workspace/Shared`).
+1. **Authenticate the Databricks CLI** (requires CLI `>= v0.239.0`):
+   ```bash
+   databricks auth login --host https://my-workspace.cloud.databricks.com --profile my-profile
+   ```
+   *(Alternatively, export `DATABRICKS_HOST` and `DATABRICKS_TOKEN` in your shell.)*
 
-**After the first deploy**, grant the app's service principal `READ
-VOLUME` on the documents volume, `READ VOLUME` + `WRITE VOLUME` on the
-page-image volume, and `CAN QUERY` on the serving endpoint. No token is
-needed inside the deployed app — it uses the injected M2M OAuth
-credentials.
+2. **Set your bundle variables** — either edit the `default:` values under `variables:` in `databricks.yml`, or pass them on the command line with `--var`:
+   ```bash
+   # Validate the bundle configuration
+   databricks bundle validate -t dev --profile my-profile \
+     --var="warehouse_id=<your-warehouse-id>" \
+     --var="documents_path=/Volumes/<catalog>/<schema>/docs" \
+     --var="custom_endpoint_names=ai-parse-document-fmapi"
+
+   # Deploy and start the app
+   databricks bundle deploy -t dev --profile my-profile \
+     --var="warehouse_id=<your-warehouse-id>" \
+     --var="documents_path=/Volumes/<catalog>/<schema>/docs" \
+     --var="custom_endpoint_names=ai-parse-document-fmapi"
+   ```
+   If you updated the defaults directly in `databricks.yml`, you can simply run:
+   ```bash
+   databricks bundle deploy -t dev --profile my-profile
+   ```
+   Targets are `dev` (default) and `prod` (`-t prod` deploys under `/Workspace/Shared`).
+
+---
+
+### Option 2: Deploy from a DAB in the Databricks Workspace
+
+You can also deploy and manage the bundle directly from the Databricks Workspace UI without installing the CLI locally:
+
+1. **Import the repository into your Workspace**:
+   * In the left sidebar, click **Workspace** → navigate to your user folder (or `/Workspace/Shared`).
+   * Click **Create** → **Git folder**, paste the repository URL, and click **Create Git folder** (or upload the project folder directly into Workspace files).
+2. **Configure `databricks.yml` variables**:
+   * Open `databricks.yml` in the Workspace editor and set your workspace's values for `warehouse_id`, `documents_path`, and `custom_endpoint_names` under `variables:` (or override them in the Bundles UI panel).
+3. **Deploy from the Asset Bundles UI**:
+   * Open the **Bundle** view in the left-hand sidebar of the Git folder (the bundle icon next to the file tree).
+   * Select your target (`dev` or `prod`).
+   * Click **Validate** to verify the configuration, then click **Deploy**.
+   * Because `lifecycle.started: true` is configured on `resources.apps.parse-document-compare`, clicking **Deploy** will create the app, bind the SQL warehouse, sync the source files, and start the app compute automatically.
+   * Once deployed, open **Compute** → **Apps** → **parse-document-compare** to view the running app URL and logs.
+
+---
+
+### Post-deploy permissions
+
+* **SQL Warehouse**: `warehouse_id` binds the SQL warehouse as a `CAN_USE` resource named `sql-warehouse`, so the app's service principal is granted `CAN_USE` automatically on deploy.
+* **Volume & Serving Endpoints**: After the first deploy, grant the app's service principal:
+  * `READ VOLUME` + `WRITE VOLUME` on the `documents_path` volume (used both for reading/uploading documents and for writing rendered page images under `<documents_path>/page_images`)
+  * `CAN QUERY` on each Model Serving endpoint listed in `custom_endpoint_names`
+
+No PAT is needed inside the deployed app — it uses the M2M OAuth credentials injected automatically by the Databricks Apps runtime.
 
 ---
 
