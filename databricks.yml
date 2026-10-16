@@ -17,6 +17,9 @@ bundle:
 # Deployment variables — override per workspace.
 # ------------------------------------------------------------
 variables:
+  app_name:
+    description: Name of the deployed Databricks App.
+    default: "parse-document-compare"
   warehouse_id:
     description: SQL warehouse that runs ai_parse_document and ai_query.
     default: "<sql warehouse_id>"
@@ -46,7 +49,7 @@ sync:
 resources:
   apps:
     parse-document-compare:
-      name: parse-document-compare
+      name: ${var.app_name}
       description: "Side-by-side comparison of ai_parse_document and Model Serving document parsers"
       # Deploy from the bundle's synced source folder.
       source_code_path: ./

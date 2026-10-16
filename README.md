@@ -161,6 +161,7 @@ Defaults live in `databricks.yml` under `variables:` and flow into `app.yaml` / 
 
 | Bundle variable (`databricks.yml`) | Env variable (`app.yaml`) | Default | Purpose |
 |---|---|---|---|
+| `app_name` | *(injected as `DATABRICKS_APP_NAME`)* | `parse-document-compare` | Name of the deployed Databricks App. |
 | — | `DATABRICKS_HOST` | *(injected in Apps)* | Workspace URL. Required locally. |
 | — | `DATABRICKS_TOKEN` | *(local only)* | PAT for local dev. Deployed Apps use automatic M2M OAuth. |
 | `warehouse_id` | `WAREHOUSE_ID` | `<sql warehouse_id>` | SQL warehouse id that runs `ai_parse_document` and `ai_query`. |
@@ -227,6 +228,7 @@ npm run dev               # frontend on :5173, proxies /api -> :8000
 The repo ships a workspace-agnostic Databricks Asset Bundle (`databricks.yml`).
 All workspace-specific configuration lives under `variables:` in `databricks.yml`:
 
+* `app_name` — Name of the deployed Databricks App (default: `"parse-document-compare"`)
 * `warehouse_id` — SQL warehouse ID (default: `"<sql warehouse_id>"`)
 * `documents_path` — Unity Catalog volume folder with PDFs/images to parse (default: `"/Volumes/<catalog>/<schema>/docs"`). Rendered page images from `ai_parse_document` are automatically written to `<documents_path>/page_images` in the same volume.
 * `custom_endpoint_names` — Comma-separated list of Model Serving endpoint names for the parser dropdowns (default: `"ai-parse-document-fmapi"`)
