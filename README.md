@@ -291,18 +291,3 @@ You can also deploy and manage the bundle directly from the Databricks Workspace
   * `CAN QUERY` on each Model Serving endpoint listed in `custom_endpoint_names`
 
 No PAT is needed inside the deployed app — it uses the M2M OAuth credentials injected automatically by the Databricks Apps runtime.
-
----
-
-## Tested against a live workspace
-
-Verified end-to-end on a SQL warehouse with the
-`florence-2-large-ft-ai-parse-document` endpoint:
-
-* **Receipt PNG** (1179×2556) — custom returned 37 fine-grained text
-  boxes, native 14 semantic elements (the whole receipt table as one
-  `table`, the logo as a `figure`). All boxes in bounds on both sides.
-* **20-page clinical PDF** — per page, custom 8 elements vs native 6;
-  bounding boxes agreed to within 0.2% of page width. Native's
-  `error_status` was empty; the custom side surfaced a
-  `reformat_failed` fallback on one document, which the sidebar reports.
